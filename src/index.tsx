@@ -66,6 +66,7 @@ const HTML_SHELL = `<!DOCTYPE html>
 <body class="min-h-screen">
   <div id="app"></div>
   <script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js"></script>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>`;

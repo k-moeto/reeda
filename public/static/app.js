@@ -11,6 +11,26 @@ async function initPdfJs() {
   return pdfjsLib;
 }
 
+// --- kuromoji.js setup (morphological analysis for kanji reading) ---
+let kuromojiTokenizer = null;
+let kuromojiLoading = false;
+let kuromojiLoadPromise = null;
+
+function initKuromoji() {
+  if (kuromojiTokenizer) return Promise.resolve(kuromojiTokenizer);
+  if (kuromojiLoadPromise) return kuromojiLoadPromise;
+  kuromojiLoading = true;
+  kuromojiLoadPromise = new Promise((resolve, reject) => {
+    kuromoji.builder({ dicPath: 'https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/' }).build((err, tokenizer) => {
+      kuromojiLoading = false;
+      if (err) { reject(err); return; }
+      kuromojiTokenizer = tokenizer;
+      resolve(tokenizer);
+    });
+  });
+  return kuromojiLoadPromise;
+}
+
 // ============================================================
 // Romaji Mapping Engine
 // ============================================================
@@ -71,62 +91,42 @@ function kataToHira(str) {
   return str.replace(/[\u30A1-\u30F6]/g, m => String.fromCharCode(m.charCodeAt(0) - 0x60));
 }
 
-// Convert text to typing segments
-function textToSegments(text) {
+// Convert hiragana string to romaji segments
+// Returns array of { display, readings } for the hiragana portion
+function hiraToSegments(hiraStr) {
   const segments = [];
-  const hira = kataToHira(text);
   let i = 0;
+  while (i < hiraStr.length) {
+    const ch = hiraStr[i];
 
-  while (i < text.length) {
-    const ch = text[i];
-    const hch = hira[i];
-
-    // ASCII passthrough
-    if (/[a-zA-Z0-9 !?.,;:'"`~@#$%^&*()\[\]{}<>\/|+=_\-]/.test(ch)) {
-      segments.push({ display: ch, readings: [ch.toLowerCase()] });
-      i++;
-      continue;
-    }
-
-    // Newline
-    if (ch === '\n') {
-      segments.push({ display: '\u21B5', readings: ['\n'] });
-      i++;
-      continue;
-    }
-
-    // っ (double consonant) - look ahead
-    if (hch === '\u3063' && i + 1 < text.length) {
-      const nextHira = kataToHira(text[i + 1]);
+    // っ (double consonant)
+    if (ch === '\u3063' && i + 1 < hiraStr.length) {
       let found = false;
-      if (i + 2 < text.length) {
-        const twoAfter = kataToHira(text.substring(i + 1, i + 3));
+      if (i + 2 < hiraStr.length) {
+        const twoAfter = hiraStr.substring(i + 1, i + 3);
         if (ROMAJI_MAP[twoAfter]) {
           const base = ROMAJI_MAP[twoAfter];
           const readings = [base[0] + base];
           if (ROMAJI_ALTS[twoAfter]) {
-            for (const alt of ROMAJI_ALTS[twoAfter]) {
-              readings.push(alt[0] + alt);
-            }
+            for (const alt of ROMAJI_ALTS[twoAfter]) readings.push(alt[0] + alt);
           }
-          segments.push({ display: text.substring(i, i + 3), readings });
+          segments.push({ readings });
           i += 3;
           found = true;
         }
       }
       if (!found) {
-        const afterMap = ROMAJI_MAP[nextHira];
+        const next = hiraStr[i + 1];
+        const afterMap = ROMAJI_MAP[next];
         if (afterMap) {
           const readings = [afterMap[0] + afterMap];
-          if (ROMAJI_ALTS[nextHira]) {
-            for (const alt of ROMAJI_ALTS[nextHira]) {
-              readings.push(alt[0] + alt);
-            }
+          if (ROMAJI_ALTS[next]) {
+            for (const alt of ROMAJI_ALTS[next]) readings.push(alt[0] + alt);
           }
-          segments.push({ display: text.substring(i, i + 2), readings });
+          segments.push({ readings });
           i += 2;
         } else {
-          segments.push({ display: ch, readings: ['xtu', 'xtsu', 'ltu', 'ltsu'] });
+          segments.push({ readings: ['xtu', 'xtsu', 'ltu', 'ltsu'] });
           i++;
         }
       }
@@ -134,40 +134,149 @@ function textToSegments(text) {
     }
 
     // Two-char kana combos
-    if (i + 1 < text.length) {
-      const twoChar = hira.substring(i, i + 2);
+    if (i + 1 < hiraStr.length) {
+      const twoChar = hiraStr.substring(i, i + 2);
       if (ROMAJI_MAP[twoChar]) {
         const readings = [ROMAJI_MAP[twoChar]];
         if (ROMAJI_ALTS[twoChar]) readings.push(...ROMAJI_ALTS[twoChar]);
-        segments.push({ display: text.substring(i, i + 2), readings });
+        segments.push({ readings });
         i += 2;
         continue;
       }
     }
 
     // Single kana
-    if (ROMAJI_MAP[hch]) {
-      const readings = [ROMAJI_MAP[hch]];
-      if (ROMAJI_ALTS[hch]) readings.push(...ROMAJI_ALTS[hch]);
-      // ん special: allow single 'n' when next is not vowel/ya/yu/yo/na-row
-      if (hch === '\u3093' && i + 1 < text.length) {
-        const nextH = kataToHira(text[i + 1]);
+    if (ROMAJI_MAP[ch]) {
+      const readings = [ROMAJI_MAP[ch]];
+      if (ROMAJI_ALTS[ch]) readings.push(...ROMAJI_ALTS[ch]);
+      // ん: allow single 'n' when next is not vowel/ya/yu/yo/na-row
+      if (ch === '\u3093' && i + 1 < hiraStr.length) {
+        const nextH = hiraStr[i + 1];
         const nextRoma = ROMAJI_MAP[nextH] || '';
         if (!/[\u3042\u3044\u3046\u3048\u304A\u3084\u3086\u3088\u306A\u306B\u306C\u306D\u306E]/.test(nextH) && !/^[aiueoy]/.test(nextRoma)) {
           readings.unshift('n');
         }
       }
-      segments.push({ display: ch, readings });
+      segments.push({ readings });
       i++;
       continue;
     }
 
-    // Unknown character - passthrough
-    segments.push({ display: ch, readings: [ch] });
+    // Unknown kana - passthrough
+    segments.push({ readings: [ch] });
     i++;
   }
-
   return segments;
+}
+
+// Merge multiple sub-segments into a single combined romaji for a word
+// e.g. 聖 (display) -> reading "せい" -> sub-segments [{readings:['se']},{readings:['i']}]
+// -> combined readings: ['sei']
+function mergeReadings(subSegments) {
+  if (subSegments.length === 0) return [''];
+  if (subSegments.length === 1) return subSegments[0].readings;
+
+  // Build all combinations (limit to avoid explosion)
+  let combos = subSegments[0].readings.map(r => [r]);
+  for (let i = 1; i < subSegments.length; i++) {
+    const newCombos = [];
+    for (const combo of combos) {
+      for (const r of subSegments[i].readings) {
+        newCombos.push([...combo, r]);
+        if (newCombos.length > 20) break; // limit
+      }
+      if (newCombos.length > 20) break;
+    }
+    combos = newCombos;
+  }
+  return combos.map(c => c.join(''));
+}
+
+// Main function: Convert text to typing segments using kuromoji
+// Each segment = { display: original text, readings: [romaji options] }
+async function textToSegments(text) {
+  const tokenizer = await initKuromoji();
+  const tokens = tokenizer.tokenize(text);
+  const segments = [];
+
+  for (const token of tokens) {
+    const surface = token.surface_form;
+
+    // Newlines
+    if (surface === '\n' || surface === '\r\n') {
+      segments.push({ display: '\u21B5', readings: ['\n'] });
+      continue;
+    }
+
+    // Whitespace-only
+    if (/^\s+$/.test(surface)) {
+      for (const ch of surface) {
+        if (ch === '\n') {
+          segments.push({ display: '\u21B5', readings: ['\n'] });
+        } else {
+          segments.push({ display: ' ', readings: [' '] });
+        }
+      }
+      continue;
+    }
+
+    // ASCII passthrough (letter by letter)
+    if (/^[a-zA-Z0-9 !?.,;:'"`~@#$%^&*()\[\]{}<>\/|+=_\-]+$/.test(surface)) {
+      for (const ch of surface) {
+        segments.push({ display: ch, readings: [ch.toLowerCase()] });
+      }
+      continue;
+    }
+
+    // Japanese punctuation / symbols - map directly
+    if (/^[\u3000-\u3004\u3006-\u303F\uFF01-\uFF60]+$/.test(surface)) {
+      for (const ch of surface) {
+        if (ROMAJI_MAP[ch]) {
+          segments.push({ display: ch, readings: [ROMAJI_MAP[ch]] });
+        } else if (ROMAJI_MAP[kataToHira(ch)]) {
+          segments.push({ display: ch, readings: [ROMAJI_MAP[kataToHira(ch)]] });
+        } else {
+          segments.push({ display: ch, readings: [ch] });
+        }
+      }
+      continue;
+    }
+
+    // Get reading from kuromoji (katakana) -> hiragana
+    const reading = token.reading || token.pronunciation || '';
+    const hiraReading = kataToHira(reading);
+
+    // If kuromoji gave us a reading, use it for the whole word as one segment
+    if (hiraReading && hiraReading.length > 0 && /^[\u3040-\u309F\u30A0-\u30FF]+$/.test(reading)) {
+      const subSegs = hiraToSegments(hiraReading);
+      const combinedReadings = mergeReadings(subSegs);
+      segments.push({ display: surface, readings: combinedReadings });
+      continue;
+    }
+
+    // Fallback: if the surface itself is kana, process character by character
+    const surfaceHira = kataToHira(surface);
+    if (/^[\u3040-\u309F]+$/.test(surfaceHira)) {
+      const subSegs = hiraToSegments(surfaceHira);
+      const combinedReadings = mergeReadings(subSegs);
+      segments.push({ display: surface, readings: combinedReadings });
+      continue;
+    }
+
+    // Last resort: display as-is, character by character
+    for (const ch of surface) {
+      const chHira = kataToHira(ch);
+      if (ROMAJI_MAP[chHira]) {
+        segments.push({ display: ch, readings: [ROMAJI_MAP[chHira]] });
+      } else {
+        // Truly unknown char - skip it in typing (auto-advance)
+        segments.push({ display: ch, readings: [''] });
+      }
+    }
+  }
+
+  // Filter out empty-reading segments (they'd just confuse typing)
+  return segments.filter(s => s.readings.length > 0 && s.readings[0] !== '');
 }
 
 
@@ -716,8 +825,17 @@ async function openDocument(docId) {
   state.currentProgress = data.progress;
   state.currentBookmarks = data.bookmarks || [];
 
+  // Show loading while kuromoji initializes
+  state.view = 'typing';
+  state.segments = [];
+  render();
+  const textEl = document.getElementById('text-display');
+  const romaEl = document.getElementById('romaji-display');
+  if (textEl) textEl.innerHTML = '<span class="text-ink-400">辞書を読み込み中...</span>';
+  if (romaEl) romaEl.innerHTML = '<span class="text-ink-300 text-sm">初回のみ数秒かかります</span>';
+
   const content = data.document.content;
-  state.segments = textToSegments(content);
+  state.segments = await textToSegments(content);
   state.segmentIndex = data.progress?.current_position || 0;
   state.charIndex = 0;
   state.activeReading = null;
