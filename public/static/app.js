@@ -172,6 +172,103 @@ function textToSegments(text) {
 
 
 // ============================================================
+// Text Cleaning Engine
+// ============================================================
+
+// Common navigation / UI noise patterns to remove
+const NOISE_PATTERNS = [
+  // Nav items: short words separated by pipes, slashes, or just listed
+  /^\s*(HOME|MENU|TOP|BACK|NEXT|PREV|INDEX|CONTACT|ABOUT|FAQ|SEARCH|LOGIN|LOGOUT|SIGN\s*(?:IN|UP|OUT)|REGISTER|CART|CLOSE|OPEN|SHARE|PRINT|DOWNLOAD|MORE|LESS|SHOW|HIDE|TOGGLE|EXPAND|COLLAPSE)\s*$/gim,
+  // Breadcrumbs: "HOME > Category > Subcategory" patterns
+  /^\s*(?:HOME|TOP|トップ|ホーム)\s*[>›»→▶\|／/].*$/gm,
+  // Nav bars: lines that are mostly short items separated by delimiters
+  /^\s*(?:[\w\u3000-\u9FFF]{1,8}\s*[|│｜/／>›»·・▸▶■□●○◆◇★☆]\s*){2,}[\w\u3000-\u9FFF]{1,8}\s*$/gm,
+  // Page numbers
+  /^\s*(?:(?:p|P|ページ|page)?\.?\s*\d{1,5}\s*(?:\/\s*\d{1,5})?)\s*$/gm,
+  // Header/footer repeats: copyright, all rights reserved
+  /^.*(?:©|Copyright|All\s*Rights\s*Reserved|無断転載禁止|無断複製|転載禁止).*$/gim,
+  // SNS share buttons text
+  /^\s*(?:(?:Share|シェア|共有|Tweet|ツイート|いいね|Like|Follow|フォロー|Subscribe|RSS|LINE|Facebook|Twitter|Instagram|YouTube|TikTok)\s*[\s|/・]*){2,}.*$/gim,
+  // Cookie/privacy banners
+  /^.*(?:Cookie|クッキー|プライバシー|Privacy\s*Policy).*(?:同意|承諾|Accept|OK|閉じる|Close).*$/gim,
+  // Ad labels
+  /^\s*(?:広告|PR|AD|Sponsored|スポンサー|\[PR\]|【PR】|【広告】|ADVERTISEMENT)\s*$/gim,
+  // Empty brackets/parens alone
+  /^\s*[\[\]()（）「」『』【】{}\<\>]+\s*$/gm,
+  // Arrows and decorative separators alone on a line
+  /^\s*[=\-─━═▬◆◇■□●○★☆♦♠♣♥►▶◄◀▲▼△▽※†‡§¶→←↑↓↔⇒⇐⇑⇓]{3,}\s*$/gm,
+  // "Read more" / "続きを読む" type links
+  /^\s*(?:続きを読む|もっと見る|Read\s*more|See\s*more|View\s*all|Show\s*more|詳しくはこちら|Click\s*here|こちら)\s*[→>›»]?\s*$/gim,
+  // Category/tag labels (isolated short items)
+  /^\s*(?:カテゴリ[ー:]?|タグ[:]?|Category[:]?|Tags?[:]?)\s*$/gim,
+  // Dates alone (just a date, no content)
+  /^\s*\d{4}[\/\-\.年]\d{1,2}[\/\-\.月]\d{1,2}日?\s*$/gm,
+  // URLs alone on a line
+  /^\s*https?:\/\/[^\s]+\s*$/gm,
+  // Email addresses alone
+  /^\s*[\w.+-]+@[\w-]+\.[\w.]+\s*$/gm,
+];
+
+// Lines that look like navigation when they appear at the very start or end
+const EDGE_NOISE_PATTERNS = [
+  // Very short lines (< 5 chars) at edges that are likely nav
+  /^.{1,4}$/,
+  // Lines that are ALL CAPS or all katakana (likely menu items)
+  /^[A-Z\s]{2,30}$/,
+  /^[\u30A0-\u30FF\s]{2,10}$/,
+];
+
+function cleanText(raw) {
+  let text = raw;
+
+  // Step 1: Basic normalization
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  // Normalize multiple spaces (but keep newlines)
+  text = text.replace(/[^\S\n]+/g, ' ');
+
+  // Step 2: Apply noise pattern removal
+  for (const pattern of NOISE_PATTERNS) {
+    text = text.replace(pattern, '');
+  }
+
+  // Step 3: Remove noise lines at the beginning and end
+  let lines = text.split('\n');
+  
+  // Trim noise from start
+  while (lines.length > 0) {
+    const line = lines[0].trim();
+    if (line === '') { lines.shift(); continue; }
+    const isNoise = EDGE_NOISE_PATTERNS.some(p => p.test(line));
+    // Also check if it's a nav-like line: multiple short words with no sentence structure
+    const isNavLike = line.length < 50 && !line.match(/[。、.!?！？]/) && (line.split(/[\s|/・│｜]/).filter(w => w.trim()).length >= 3);
+    if (isNoise || isNavLike) {
+      lines.shift();
+    } else {
+      break;
+    }
+  }
+
+  // Trim noise from end
+  while (lines.length > 0) {
+    const line = lines[lines.length - 1].trim();
+    if (line === '') { lines.pop(); continue; }
+    const isNoise = EDGE_NOISE_PATTERNS.some(p => p.test(line));
+    const isNavLike = line.length < 50 && !line.match(/[。、.!?！？]/) && (line.split(/[\s|/・│｜]/).filter(w => w.trim()).length >= 3);
+    if (isNoise || isNavLike) {
+      lines.pop();
+    } else {
+      break;
+    }
+  }
+
+  // Step 4: Collapse excessive blank lines
+  text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  return text;
+}
+
+
+// ============================================================
 // State Management
 // ============================================================
 const state = {
@@ -194,6 +291,10 @@ const state = {
   autoSaveInterval: null,
   lastMiss: false,
   parsing: false,
+  // Preview state
+  previewTitle: '',
+  previewContent: '',
+  previewSourceType: '',
 };
 
 // ============================================================
@@ -215,7 +316,14 @@ function render() {
   switch (state.view) {
     case 'loading': app.innerHTML = renderLoading(); break;
     case 'auth': app.innerHTML = renderAuth(); bindAuth(); break;
-    case 'dashboard': app.innerHTML = renderDashboard(); bindDashboard(); break;
+    case 'dashboard':
+      app.innerHTML = renderDashboard();
+      if (state.previewContent) {
+        bindPreview();
+      } else {
+        bindDashboard();
+      }
+      break;
     case 'typing': app.innerHTML = renderTyping(); bindTyping(); break;
   }
 }
@@ -343,6 +451,10 @@ async function loadDocuments() {
 }
 
 function renderDashboard() {
+  // Check if we need to show preview
+  if (state.view === 'dashboard' && state.previewContent) {
+    return renderPreview();
+  }
   const docs = state.documents;
   const docList = docs.length === 0
     ? '<p class="text-ink-400 text-sm text-center py-8">まだドキュメントがありません</p>'
@@ -429,7 +541,8 @@ function bindDashboard() {
     const title = document.getElementById('paste-title').value.trim() || '無題';
     const content = document.getElementById('paste-content').value.trim();
     if (!content) return;
-    await saveAndOpen(title, content, 'paste');
+    const cleaned = cleanText(content);
+    showPreview(title, cleaned, 'paste');
   };
 
   document.getElementById('doc-list').onclick = async (e) => {
@@ -474,8 +587,10 @@ async function handleFile(file) {
     text = text.trim();
     if (!text) { alert('テキストを抽出できませんでした'); return; }
 
+    // Clean the text and show preview
+    const cleaned = cleanText(text);
     const title = name.replace(/\.[^.]+$/, '');
-    await saveAndOpen(title, text, ext);
+    showPreview(title, cleaned, ext);
   } catch (err) {
     console.error(err);
     alert('ファイルの読み取りに失敗しました: ' + err.message);
@@ -501,6 +616,77 @@ async function parseDocx(file) {
   const arrayBuffer = await file.arrayBuffer();
   const result = await mammoth.extractRawText({ arrayBuffer });
   return result.value;
+}
+
+// ============================================================
+// Preview View (text cleaning confirmation)
+// ============================================================
+function showPreview(title, content, sourceType) {
+  state.previewTitle = title;
+  state.previewContent = content;
+  state.previewSourceType = sourceType;
+  render(); // re-renders dashboard which will show preview
+}
+
+function renderPreview() {
+  const lineCount = state.previewContent.split('\n').length;
+  const charCount = state.previewContent.length;
+  return `
+  <div class="max-w-2xl mx-auto px-4 py-8 min-h-screen fade-in">
+    <header class="flex items-center justify-between mb-6">
+      <button id="preview-cancel" class="text-ink-400 hover:text-ink-700 text-sm transition">\u2190 戻る</button>
+      <h2 class="text-sm font-medium">テキスト確認</h2>
+      <div></div>
+    </header>
+
+    <p class="text-xs text-ink-400 mb-4">余計な文字列は自動で除去されています。必要に応じて編集してください。</p>
+
+    <div class="mb-4">
+      <input type="text" id="preview-title" value="${escAttr(state.previewTitle)}"
+        class="w-full px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:border-ink-900 bg-white font-medium" />
+    </div>
+
+    <div class="mb-3">
+      <textarea id="preview-content" rows="18"
+        class="w-full px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:border-ink-900 bg-white font-mono leading-relaxed resize-y">${escHtml(state.previewContent)}</textarea>
+    </div>
+
+    <div class="flex items-center justify-between mb-6">
+      <span class="text-xs text-ink-400">${charCount.toLocaleString()}文字 / ${lineCount}行</span>
+      <div class="flex gap-2">
+        <button id="preview-cancel-btn" class="px-4 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50 transition">キャンセル</button>
+        <button id="preview-save" class="px-4 py-2 text-sm bg-ink-900 text-white rounded-lg hover:bg-ink-800 transition">読み始める</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindPreview() {
+  const cancelBtn = document.getElementById('preview-cancel');
+  const cancelBtn2 = document.getElementById('preview-cancel-btn');
+  const saveBtn = document.getElementById('preview-save');
+
+  if (!cancelBtn) return; // not in preview mode
+
+  const doCancel = () => {
+    state.previewTitle = '';
+    state.previewContent = '';
+    state.previewSourceType = '';
+    render();
+  };
+
+  cancelBtn.onclick = doCancel;
+  cancelBtn2.onclick = doCancel;
+
+  saveBtn.onclick = async () => {
+    const title = document.getElementById('preview-title').value.trim() || '無題';
+    const content = document.getElementById('preview-content').value.trim();
+    if (!content) { alert('テキストが空です'); return; }
+    state.previewTitle = '';
+    state.previewContent = '';
+    await saveAndOpen(title, content, state.previewSourceType);
+    state.previewSourceType = '';
+  };
 }
 
 async function saveAndOpen(title, content, sourceType) {
@@ -810,6 +996,11 @@ async function saveProgress(completed = false) {
 function escHtml(s) {
   if (!s) return '';
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function escAttr(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ============================================================
