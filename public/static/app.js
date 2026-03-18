@@ -289,7 +289,18 @@ function renderDashboard() {
   const docList = docs.length === 0
     ? '<p class="text-ink-400 text-sm text-center py-8">まだドキュメントがありません</p>'
     : docs.map(d => {
-        const pct = d.total_chars > 0 ? Math.round((d.current_position || 0) / d.total_chars * 100) : 0;
+        const pos = d.current_position || 0;
+        const total = d.total_chars || 1;
+        const pct = d.completed ? 100 : Math.min(99, Math.round(pos / total * 100));
+        const timeSec = d.reading_time_sec || 0;
+        const timeStr = timeSec > 0 ? (timeSec >= 60 ? Math.floor(timeSec/60) + '分' + (timeSec%60 > 0 ? (timeSec%60)+'秒' : '') : timeSec + '秒') : '';
+        const correct = d.correct_count || 0;
+        const miss = d.miss_count || 0;
+        const accPct = (correct + miss) > 0 ? Math.round(correct / (correct + miss) * 100) : 0;
+        const wpm = timeSec > 0 ? Math.round(correct / (timeSec / 60)) : 0;
+        const statsHtml = timeSec > 0
+          ? `<span class="text-xs text-ink-300">${wpm} WPM</span><span class="text-xs text-ink-300">${accPct}%</span><span class="text-xs text-ink-300">${timeStr}</span>`
+          : '';
         return `
         <div class="group flex items-center gap-4 py-3 px-4 rounded-lg hover:bg-ink-50 cursor-pointer transition" data-doc-id="${d.id}">
           <div class="flex-1 min-w-0">
@@ -300,6 +311,7 @@ function renderDashboard() {
               </div>
               <span class="text-xs text-ink-400">${pct}%</span>
               <span class="text-xs text-ink-300">${d.total_chars.toLocaleString()}字</span>
+              ${statsHtml}
             </div>
           </div>
           <button class="delete-doc opacity-0 group-hover:opacity-100 text-ink-300 hover:text-red-500 text-xs transition p-1" data-del-id="${d.id}">\u2715</button>
@@ -587,6 +599,15 @@ async function openDocument(docId) {
   if (state.segmentIndex >= state.segments.length) {
     state.segmentIndex = 0;
   }
+  // Skip any leading newline segments at current position
+  while (state.segmentIndex < state.segments.length) {
+    const seg = state.segments[state.segmentIndex];
+    if (seg.readings.length === 1 && seg.readings[0] === '\n') {
+      state.segmentIndex++;
+    } else {
+      break;
+    }
+  }
   state.charIndex = 0;
   state.activeReading = null;
   state.missCount = data.progress?.miss_count || 0;
@@ -763,14 +784,83 @@ function advanceSegment() {
   state.charIndex = 0;
   state.activeReading = null;
 
+  // Auto-skip newline segments (no need to press Enter)
+  while (state.segmentIndex < state.segments.length) {
+    const next = state.segments[state.segmentIndex];
+    if (next.readings.length === 1 && next.readings[0] === '\n') {
+      state.segmentIndex++;
+    } else {
+      break;
+    }
+  }
+
   if (state.segmentIndex >= state.segments.length) {
     clearInterval(state.timerInterval);
     clearInterval(state.autoSaveInterval);
     saveProgress(true);
-    setTimeout(() => {
-      alert('読了おめでとうございます！');
-    }, 100);
+    showResults();
   }
+}
+
+function showResults() {
+  const elapsed = state.elapsedSec + (state.startTime ? Math.floor((Date.now() - state.startTime) / 1000) : 0);
+  const total = state.correctCount + state.missCount;
+  const acc = total > 0 ? Math.round(state.correctCount / total * 1000) / 10 : 100;
+  const wpm = elapsed > 0 ? Math.round(state.correctCount / (elapsed / 60)) : 0;
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
+
+  if (_keydownHandler) {
+    document.removeEventListener('keydown', _keydownHandler);
+    _keydownHandler = null;
+  }
+
+  const app = document.getElementById('app');
+  app.innerHTML = `
+  <div class="max-w-lg mx-auto px-4 py-16 min-h-screen flex flex-col items-center justify-center fade-in">
+    <div class="text-center mb-10">
+      <p class="text-4xl mb-4">\uD83C\uDF89</p>
+      <h2 class="text-xl font-semibold mb-2">読了おめでとうございます！</h2>
+      <p class="text-ink-400 text-sm">${escHtml(state.currentDoc.title)}</p>
+    </div>
+
+    <div class="w-full bg-white border border-ink-100 rounded-xl p-6 mb-8">
+      <div class="grid grid-cols-2 gap-6">
+        <div class="text-center">
+          <p class="text-3xl font-semibold">${wpm}</p>
+          <p class="text-xs text-ink-400 mt-1">WPM</p>
+        </div>
+        <div class="text-center">
+          <p class="text-3xl font-semibold">${acc}%</p>
+          <p class="text-xs text-ink-400 mt-1">正確率</p>
+        </div>
+        <div class="text-center">
+          <p class="text-3xl font-semibold">${timeStr}</p>
+          <p class="text-xs text-ink-400 mt-1">読書時間</p>
+        </div>
+        <div class="text-center">
+          <p class="text-3xl font-semibold">${state.segments.length}</p>
+          <p class="text-xs text-ink-400 mt-1">セグメント</p>
+        </div>
+      </div>
+      <div class="mt-6 pt-4 border-t border-ink-100 flex justify-between text-xs text-ink-400">
+        <span>正打: ${state.correctCount}</span>
+        <span>誤打: ${state.missCount}</span>
+        <span>合計: ${state.totalTyped}</span>
+      </div>
+    </div>
+
+    <button id="result-back" class="px-6 py-2.5 bg-ink-900 text-white text-sm font-medium rounded-lg hover:bg-ink-800 transition">
+      ダッシュボードに戻る
+    </button>
+  </div>`;
+
+  document.getElementById('result-back').onclick = async () => {
+    state.view = 'dashboard';
+    await loadDocuments();
+    render();
+  };
 }
 
 function updateTypingDisplay() {
