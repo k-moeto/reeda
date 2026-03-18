@@ -16,21 +16,49 @@ async function initPdfJs() {
 // Text Cleaning Engine (client-side, applied before sending to server)
 // ============================================================
 const NOISE_PATTERNS = [
+  // UI / Navigation labels
   /^\s*(HOME|MENU|TOP|BACK|NEXT|PREV|INDEX|CONTACT|ABOUT|FAQ|SEARCH|LOGIN|LOGOUT|SIGN\s*(?:IN|UP|OUT)|REGISTER|CART|CLOSE|OPEN|SHARE|PRINT|DOWNLOAD|MORE|LESS|SHOW|HIDE|TOGGLE|EXPAND|COLLAPSE)\s*$/gim,
+  // Breadcrumbs
   /^\s*(?:HOME|TOP|トップ|ホーム)\s*[>›»→▶\|／/].*$/gm,
+  // Nav bars (short items separated by delimiters)
   /^\s*(?:[\w\u3000-\u9FFF]{1,8}\s*[|│｜/／>›»·・▸▶■□●○◆◇★☆]\s*){2,}[\w\u3000-\u9FFF]{1,8}\s*$/gm,
+  // Page numbers
   /^\s*(?:(?:p|P|ページ|page)?\.?\s*\d{1,5}\s*(?:\/\s*\d{1,5})?)\s*$/gm,
+  // Copyright / legal
   /^.*(?:©|Copyright|All\s*Rights\s*Reserved|無断転載禁止|無断複製|転載禁止).*$/gim,
+  // Social share buttons
   /^\s*(?:(?:Share|シェア|共有|Tweet|ツイート|いいね|Like|Follow|フォロー|Subscribe|RSS|LINE|Facebook|Twitter|Instagram|YouTube|TikTok)\s*[\s|/・]*){2,}.*$/gim,
+  // Cookie/privacy banners
   /^.*(?:Cookie|クッキー|プライバシー|Privacy\s*Policy).*(?:同意|承諾|Accept|OK|閉じる|Close).*$/gim,
+  // Ad labels
   /^\s*(?:広告|PR|AD|Sponsored|スポンサー|\[PR\]|【PR】|【広告】|ADVERTISEMENT)\s*$/gim,
-  /^\s*[\[\]()（）「」『』【】{}\<\>]+\s*$/gm,
-  /^\s*[=\-─━═▬◆◇■□●○★☆♦♠♣♥►▶◄◀▲▼△▽※†‡§¶→←↑↓↔⇒⇐⇑⇓]{3,}\s*$/gm,
-  /^\s*(?:続きを読む|もっと見る|Read\s*more|See\s*more|View\s*all|Show\s*more|詳しくはこちら|Click\s*here|こちら)\s*[→>›»]?\s*$/gim,
+  // Lines that are only brackets/parens
+  /^\s*[\[\]()（）「」『』【】{}<>〈〉《》〔〕\u3014\u3015]+\s*$/gm,
+  // Decorative separator lines
+  /^\s*[=\-─━═▬◆◇■□●○★☆♦♠♣♥►▶◄◀▲▼△▽※†‡§¶→←↑↓↔⇒⇐⇑⇓…‥・]{3,}\s*$/gm,
+  // "Read more" links
+  /^\s*(?:続きを読む|もっと見る|もっと読む|Read\s*more|See\s*more|View\s*all|Show\s*more|詳しくはこちら|Click\s*here|こちら|詳細を見る|全文を読む)\s*[→>›»]?\s*$/gim,
+  // Category/tag labels alone
   /^\s*(?:カテゴリ[ー:]?|タグ[:]?|Category[:]?|Tags?[:]?)\s*$/gim,
+  // Dates alone on a line
   /^\s*\d{4}[\/\-\.年]\d{1,2}[\/\-\.月]\d{1,2}日?\s*$/gm,
+  // URLs alone
   /^\s*https?:\/\/[^\s]+\s*$/gm,
+  // Email addresses alone
   /^\s*[\w.+-]+@[\w-]+\.[\w.]+\s*$/gm,
+  // Subscription / newsletter prompts
+  /^\s*(?:メールマガジン|ニュースレター|Newsletter|メルマガ|購読|配信登録|登録はこちら).*$/gim,
+  // Comment section headers
+  /^\s*(?:コメント|Comments?|コメントを(?:書く|残す|投稿)|Leave\s*a?\s*(?:comment|reply)|返信).*$/gim,
+  // Related articles headers
+  /^\s*(?:関連(?:記事|ニュース|リンク)|おすすめ記事|人気記事|新着記事|Related\s*(?:Articles?|Posts?|Links?)|Recommended|Popular|Recent).*$/gim,
+  // Author/publish metadata lines (short, with labels)
+  /^\s*(?:著者|執筆者|ライター|Author|Writer|By)\s*[:：]\s*.{0,30}\s*$/gim,
+  /^\s*(?:公開日|更新日|投稿日|掲載日|Published|Updated|Posted)\s*[:：]?\s*\d{4}.*$/gim,
+  // "Back to top" / pagination
+  /^\s*(?:ページの先頭へ|トップに戻る|Back\s*to\s*top|前へ|次へ|前のページ|次のページ)\s*$/gim,
+  // Pure number sequences (like page counts)
+  /^\s*\d+\s*$/gm,
 ];
 
 const EDGE_NOISE_PATTERNS = [
@@ -589,8 +617,8 @@ function renderTyping() {
     </header>
 
     <div class="flex-1 flex flex-col justify-center mb-6">
-      <div id="text-display" class="text-xl leading-relaxed mb-8 min-h-[120px]"></div>
-      <div id="romaji-display" class="mono text-lg text-center py-4 border-t border-ink-100"></div>
+      <div id="text-display" class="text-2xl leading-loose mb-6 min-h-[200px]"></div>
+      <div id="romaji-display" class="mono text-3xl tracking-wider text-center py-6 border-t border-ink-100"></div>
     </div>
 
     <footer class="flex-shrink-0 border-t border-ink-100 pt-4 pb-2">
@@ -753,8 +781,8 @@ function updateTypingDisplay() {
   const segs = state.segments;
   const idx = state.segmentIndex;
 
-  const CONTEXT_BEFORE = 20;
-  const CONTEXT_AFTER = 40;
+  const CONTEXT_BEFORE = 40;
+  const CONTEXT_AFTER = 80;
   const start = Math.max(0, idx - CONTEXT_BEFORE);
   const end = Math.min(segs.length, idx + CONTEXT_AFTER);
 

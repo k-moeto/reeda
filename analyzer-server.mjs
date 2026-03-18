@@ -72,6 +72,34 @@ const ROMAJI_MAP = {
   'ー':'-','。':'.','、':',','！':'!','？':'?',
   '「':'[','」':']','（':'(','）':')','・':'/',
   '\u3000':' ',
+  // Additional brackets & quotes
+  '【':'[','】':']','『':'[','』':']',
+  '〈':'<','〉':'>','《':'<','》':'>',
+  '〔':'(','〕':')',
+  '\u201C':'"','\u201D':'"','\u2018':"'",'\u2019':"'",  // curly quotes
+  '\uFF08':'(','\uFF09':')',  // fullwidth parens
+  '\uFF3B':'[','\uFF3D':']',  // fullwidth brackets
+  '\uFF5B':'{','\uFF5D':'}',  // fullwidth braces
+  // Fullwidth alphanumeric & symbols
+  '\uFF01':'!','\uFF02':'"','\uFF03':'#','\uFF04':'$','\uFF05':'%',
+  '\uFF06':'&','\uFF07':"'",'\uFF0A':'*','\uFF0B':'+','\uFF0C':',',
+  '\uFF0D':'-','\uFF0E':'.','\uFF0F':'/',
+  '\uFF10':'0','\uFF11':'1','\uFF12':'2','\uFF13':'3','\uFF14':'4',
+  '\uFF15':'5','\uFF16':'6','\uFF17':'7','\uFF18':'8','\uFF19':'9',
+  '\uFF1A':':','\uFF1B':';','\uFF1C':'<','\uFF1D':'=','\uFF1E':'>','\uFF1F':'?','\uFF20':'@',
+  '\uFF21':'a','\uFF22':'b','\uFF23':'c','\uFF24':'d','\uFF25':'e','\uFF26':'f','\uFF27':'g',
+  '\uFF28':'h','\uFF29':'i','\uFF2A':'j','\uFF2B':'k','\uFF2C':'l','\uFF2D':'m','\uFF2E':'n',
+  '\uFF2F':'o','\uFF30':'p','\uFF31':'q','\uFF32':'r','\uFF33':'s','\uFF34':'t','\uFF35':'u',
+  '\uFF36':'v','\uFF37':'w','\uFF38':'x','\uFF39':'y','\uFF3A':'z',
+  '\uFF41':'a','\uFF42':'b','\uFF43':'c','\uFF44':'d','\uFF45':'e','\uFF46':'f','\uFF47':'g',
+  '\uFF48':'h','\uFF49':'i','\uFF4A':'j','\uFF4B':'k','\uFF4C':'l','\uFF4D':'m','\uFF4E':'n',
+  '\uFF4F':'o','\uFF50':'p','\uFF51':'q','\uFF52':'r','\uFF53':'s','\uFF54':'t','\uFF55':'u',
+  '\uFF56':'v','\uFF57':'w','\uFF58':'x','\uFF59':'y','\uFF5A':'z',
+  // Other common symbols
+  '…':'.','‥':'..','―':'-','─':'-','—':'-','~':'-',
+  '〜':'-','∼':'-','※':'*','†':'+','‡':'+',
+  '°':'o','′':"'",'″':'"',
+  '×':'x','÷':'/',
 };
 
 const ROMAJI_ALTS = {
@@ -200,13 +228,19 @@ function analyzeText(text) {
       continue;
     }
 
-    // Japanese punctuation
-    if (/^[\u3000-\u3004\u3006-\u303F\uFF01-\uFF60]+$/.test(surface)) {
+    // Symbols & punctuation (Japanese fullwidth, CJK symbols, etc.)
+    // Check if every char in the surface is a non-kana, non-kanji symbol
+    if (/^[^\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBFa-zA-Z0-9]+$/.test(surface)) {
       for (const ch of surface) {
-        const h = kataToHira(ch);
-        if (ROMAJI_MAP[ch]) segments.push({ display: ch, readings: [ROMAJI_MAP[ch]] });
-        else if (ROMAJI_MAP[h]) segments.push({ display: ch, readings: [ROMAJI_MAP[h]] });
-        else segments.push({ display: ch, readings: [ch] });
+        if (ROMAJI_MAP[ch]) {
+          segments.push({ display: ch, readings: [ROMAJI_MAP[ch]] });
+        } else {
+          const h = kataToHira(ch);
+          if (ROMAJI_MAP[h]) {
+            segments.push({ display: ch, readings: [ROMAJI_MAP[h]] });
+          }
+          // Unmapped symbols are silently skipped (auto-advance)
+        }
       }
       continue;
     }
@@ -229,10 +263,15 @@ function analyzeText(text) {
       continue;
     }
 
-    // Last resort: per-character
+    // Last resort: per-character with symbol mapping
     for (const ch of surface) {
-      const chH = kataToHira(ch);
-      if (ROMAJI_MAP[chH]) segments.push({ display: ch, readings: [ROMAJI_MAP[chH]] });
+      if (ROMAJI_MAP[ch]) {
+        segments.push({ display: ch, readings: [ROMAJI_MAP[ch]] });
+      } else {
+        const chH = kataToHira(ch);
+        if (ROMAJI_MAP[chH]) segments.push({ display: ch, readings: [ROMAJI_MAP[chH]] });
+        // Unmapped chars silently skipped
+      }
     }
   }
 
