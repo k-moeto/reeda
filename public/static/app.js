@@ -14,6 +14,8 @@ async function initPdfJs() {
 
 // ============================================================
 // Text Cleaning Engine (client-side, applied before sending to server)
+// Removes metadata, headers, navigation, URLs, credits, and other
+// non-content text from articles, leaving only the main body.
 // ============================================================
 const NOISE_PATTERNS = [
   // UI / Navigation labels
@@ -42,8 +44,8 @@ const NOISE_PATTERNS = [
   /^\s*(?:カテゴリ[ー:]?|タグ[:]?|Category[:]?|Tags?[:]?)\s*$/gim,
   // Dates alone on a line
   /^\s*\d{4}[\/\-\.年]\d{1,2}[\/\-\.月]\d{1,2}日?\s*$/gm,
-  // URLs alone
-  /^\s*https?:\/\/[^\s]+\s*$/gm,
+  // URLs anywhere (inline or standalone)
+  /https?:\/\/[^\s)\]>」』】]+/gm,
   // Email addresses alone
   /^\s*[\w.+-]+@[\w-]+\.[\w.]+\s*$/gm,
   // Subscription / newsletter prompts
@@ -59,6 +61,22 @@ const NOISE_PATTERNS = [
   /^\s*(?:ページの先頭へ|トップに戻る|Back\s*to\s*top|前へ|次へ|前のページ|次のページ)\s*$/gim,
   // Pure number sequences (like page counts)
   /^\s*\d+\s*$/gm,
+  // Photo credits / caption metadata
+  /^\s*(?:聞き手|写真|撮影|取材|構成|イラスト|編集|文|TEXT|PHOTO|Photo|Text)\s*[:：].*$/gim,
+  // Lines combining multiple credit roles (e.g. "聞き手・文: X 写真: Y")
+  /^\s*(?:(?:聞き手|写真|撮影|取材|構成|イラスト|編集|文|TEXT|PHOTO)\s*[:：・]?\s*[^\n]{0,30}\s*){2,}$/gim,
+  // ※ annotations
+  /^\s*※.{0,120}$/gm,
+  // Title-like lines with separator: "text | site" or "text - label"
+  /^\s*.{1,60}\s*[|｜\-–—]\s*.{1,30}\s*$/gm,
+  // Staff/role labels alone
+  /^\s*(?:[A-Za-z]+\s+Staff|Staff|STAFF|スタッフ|編集部|ライター|記者|EDITOR|Editor)\s*$/gim,
+  // Person with title/affiliation in parentheses: "名前 (肩書)"
+  /^\s*.{1,20}\s*[\(（].{1,30}[\)）]\s*$/gm,
+  // Bullet-point list items (short)
+  /^\s*[・\-\*]\s*.{1,50}\s*$/gm,
+  // "Previous / Next" article navigation
+  /^\s*(?:前の記事|次の記事|前の(?:ページ|投稿)|次の(?:ページ|投稿)|Previous|Next)\s*.{0,30}\s*$/gim,
 ];
 
 const EDGE_NOISE_PATTERNS = [
@@ -67,17 +85,48 @@ const EDGE_NOISE_PATTERNS = [
   /^[\u30A0-\u30FF\s]{2,10}$/,
 ];
 
+// Detect if a line is actual body content (readable text)
+function _isBodyLine(line) {
+  if (!line || line.trim() === '') return false;
+  const t = line.trim();
+  // Dialogue: "名前: セリフ"
+  if (/^.{1,10}[:：]\s*.{5,}/.test(t)) return true;
+  // Sentence with ending punctuation and contains Japanese
+  if (/[。！？!?」』\)）]\s*$/.test(t) && /[\u3040-\u9FFF]/.test(t)) return true;
+  // Long paragraph with Japanese
+  if (t.length >= 40 && /[\u3040-\u9FFF]/.test(t)) return true;
+  return false;
+}
+
+// Find the index where body content starts, skipping header metadata
+function _findBodyStart(lines) {
+  // If the first non-empty line is already body, return it immediately
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t === '') continue;
+    if (_isBodyLine(t)) return i;
+    break; // first non-empty line is not body; continue scanning
+  }
+  // Scan forward for the first body line
+  for (let i = 0; i < lines.length; i++) {
+    if (_isBodyLine(lines[i])) return i;
+  }
+  return 0;
+}
+
 function cleanText(raw) {
   let text = raw;
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   text = text.replace(/[^\S\n]+/g, ' ');
 
+  // Apply noise patterns
   for (const pattern of NOISE_PATTERNS) {
     text = text.replace(pattern, '');
   }
 
   let lines = text.split('\n');
 
+  // Trim leading noise
   while (lines.length > 0) {
     const line = lines[0].trim();
     if (line === '') { lines.shift(); continue; }
@@ -86,6 +135,13 @@ function cleanText(raw) {
     if (isNoise || isNavLike) { lines.shift(); } else { break; }
   }
 
+  // Skip header/metadata: find where body content actually starts
+  const bodyIdx = _findBodyStart(lines);
+  if (bodyIdx > 0) {
+    lines = lines.slice(bodyIdx);
+  }
+
+  // Trim trailing noise
   while (lines.length > 0) {
     const line = lines[lines.length - 1].trim();
     if (line === '') { lines.pop(); continue; }
