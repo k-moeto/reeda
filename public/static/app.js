@@ -1,5 +1,6 @@
 // ============================================================
 // reeda - Main Application (app.js)
+// Typing-based reading app for Japanese text
 // ============================================================
 
 // --- PDF.js setup ---
@@ -11,371 +12,63 @@ async function initPdfJs() {
   return pdfjsLib;
 }
 
-// --- kuromoji.js setup (morphological analysis for kanji reading) ---
-let kuromojiTokenizer = null;
-let kuromojiLoading = false;
-let kuromojiLoadPromise = null;
-
-function initKuromoji() {
-  if (kuromojiTokenizer) return Promise.resolve(kuromojiTokenizer);
-  if (kuromojiLoadPromise) return kuromojiLoadPromise;
-  kuromojiLoading = true;
-  kuromojiLoadPromise = new Promise((resolve, reject) => {
-    kuromoji.builder({ dicPath: 'https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/' }).build((err, tokenizer) => {
-      kuromojiLoading = false;
-      if (err) { reject(err); return; }
-      kuromojiTokenizer = tokenizer;
-      resolve(tokenizer);
-    });
-  });
-  return kuromojiLoadPromise;
-}
-
 // ============================================================
-// Romaji Mapping Engine
+// Text Cleaning Engine (client-side, applied before sending to server)
 // ============================================================
-const ROMAJI_MAP = {
-  'あ':'a','い':'i','う':'u','え':'e','お':'o',
-  'か':'ka','き':'ki','く':'ku','け':'ke','こ':'ko',
-  'さ':'sa','し':'si','す':'su','せ':'se','そ':'so',
-  'た':'ta','ち':'ti','つ':'tu','て':'te','と':'to',
-  'な':'na','に':'ni','ぬ':'nu','ね':'ne','の':'no',
-  'は':'ha','ひ':'hi','ふ':'hu','へ':'he','ほ':'ho',
-  'ま':'ma','み':'mi','む':'mu','め':'me','も':'mo',
-  'や':'ya','ゆ':'yu','よ':'yo',
-  'ら':'ra','り':'ri','る':'ru','れ':'re','ろ':'ro',
-  'わ':'wa','ゐ':'wi','ゑ':'we','を':'wo','ん':'nn',
-  'が':'ga','ぎ':'gi','ぐ':'gu','げ':'ge','ご':'go',
-  'ざ':'za','じ':'zi','ず':'zu','ぜ':'ze','ぞ':'zo',
-  'だ':'da','ぢ':'di','づ':'du','で':'de','ど':'do',
-  'ば':'ba','び':'bi','ぶ':'bu','べ':'be','ぼ':'bo',
-  'ぱ':'pa','ぴ':'pi','ぷ':'pu','ぺ':'pe','ぽ':'po',
-  'きゃ':'kya','きゅ':'kyu','きょ':'kyo',
-  'しゃ':'sya','しゅ':'syu','しょ':'syo',
-  'ちゃ':'tya','ちゅ':'tyu','ちょ':'tyo',
-  'にゃ':'nya','にゅ':'nyu','にょ':'nyo',
-  'ひゃ':'hya','ひゅ':'hyu','ひょ':'hyo',
-  'みゃ':'mya','みゅ':'myu','みょ':'myo',
-  'りゃ':'rya','りゅ':'ryu','りょ':'ryo',
-  'ぎゃ':'gya','ぎゅ':'gyu','ぎょ':'gyo',
-  'じゃ':'zya','じゅ':'zyu','じょ':'zyo',
-  'びゃ':'bya','びゅ':'byu','びょ':'byo',
-  'ぴゃ':'pya','ぴゅ':'pyu','ぴょ':'pyo',
-  'ふぁ':'fa','ふぃ':'fi','ふぇ':'fe','ふぉ':'fo',
-  'てぃ':'thi','でぃ':'dhi',
-  'ー':'-','。':'.','、':',','！':'!','？':'?',
-  '「':'[','」':']','（':'(','）':')','・':'/',
-  '\u3000':' ',
-};
-
-// Alternative romaji inputs accepted
-const ROMAJI_ALTS = {
-  'し': ['shi','ci'],
-  'ち': ['chi'],
-  'つ': ['tsu'],
-  'ふ': ['fu'],
-  'じ': ['ji'],
-  'しゃ': ['sha'],
-  'しゅ': ['shu'],
-  'しょ': ['sho'],
-  'ちゃ': ['cha'],
-  'ちゅ': ['chu'],
-  'ちょ': ['cho'],
-  'じゃ': ['ja','jya'],
-  'じゅ': ['ju','jyu'],
-  'じょ': ['jo','jyo'],
-};
-
-// Katakana to Hiragana converter
-function kataToHira(str) {
-  return str.replace(/[\u30A1-\u30F6]/g, m => String.fromCharCode(m.charCodeAt(0) - 0x60));
-}
-
-// Convert hiragana string to romaji segments
-// Returns array of { display, readings } for the hiragana portion
-function hiraToSegments(hiraStr) {
-  const segments = [];
-  let i = 0;
-  while (i < hiraStr.length) {
-    const ch = hiraStr[i];
-
-    // っ (double consonant)
-    if (ch === '\u3063' && i + 1 < hiraStr.length) {
-      let found = false;
-      if (i + 2 < hiraStr.length) {
-        const twoAfter = hiraStr.substring(i + 1, i + 3);
-        if (ROMAJI_MAP[twoAfter]) {
-          const base = ROMAJI_MAP[twoAfter];
-          const readings = [base[0] + base];
-          if (ROMAJI_ALTS[twoAfter]) {
-            for (const alt of ROMAJI_ALTS[twoAfter]) readings.push(alt[0] + alt);
-          }
-          segments.push({ readings });
-          i += 3;
-          found = true;
-        }
-      }
-      if (!found) {
-        const next = hiraStr[i + 1];
-        const afterMap = ROMAJI_MAP[next];
-        if (afterMap) {
-          const readings = [afterMap[0] + afterMap];
-          if (ROMAJI_ALTS[next]) {
-            for (const alt of ROMAJI_ALTS[next]) readings.push(alt[0] + alt);
-          }
-          segments.push({ readings });
-          i += 2;
-        } else {
-          segments.push({ readings: ['xtu', 'xtsu', 'ltu', 'ltsu'] });
-          i++;
-        }
-      }
-      continue;
-    }
-
-    // Two-char kana combos
-    if (i + 1 < hiraStr.length) {
-      const twoChar = hiraStr.substring(i, i + 2);
-      if (ROMAJI_MAP[twoChar]) {
-        const readings = [ROMAJI_MAP[twoChar]];
-        if (ROMAJI_ALTS[twoChar]) readings.push(...ROMAJI_ALTS[twoChar]);
-        segments.push({ readings });
-        i += 2;
-        continue;
-      }
-    }
-
-    // Single kana
-    if (ROMAJI_MAP[ch]) {
-      const readings = [ROMAJI_MAP[ch]];
-      if (ROMAJI_ALTS[ch]) readings.push(...ROMAJI_ALTS[ch]);
-      // ん: allow single 'n' when next is not vowel/ya/yu/yo/na-row
-      if (ch === '\u3093' && i + 1 < hiraStr.length) {
-        const nextH = hiraStr[i + 1];
-        const nextRoma = ROMAJI_MAP[nextH] || '';
-        if (!/[\u3042\u3044\u3046\u3048\u304A\u3084\u3086\u3088\u306A\u306B\u306C\u306D\u306E]/.test(nextH) && !/^[aiueoy]/.test(nextRoma)) {
-          readings.unshift('n');
-        }
-      }
-      segments.push({ readings });
-      i++;
-      continue;
-    }
-
-    // Unknown kana - passthrough
-    segments.push({ readings: [ch] });
-    i++;
-  }
-  return segments;
-}
-
-// Merge multiple sub-segments into a single combined romaji for a word
-// e.g. 聖 (display) -> reading "せい" -> sub-segments [{readings:['se']},{readings:['i']}]
-// -> combined readings: ['sei']
-function mergeReadings(subSegments) {
-  if (subSegments.length === 0) return [''];
-  if (subSegments.length === 1) return subSegments[0].readings;
-
-  // Build all combinations (limit to avoid explosion)
-  let combos = subSegments[0].readings.map(r => [r]);
-  for (let i = 1; i < subSegments.length; i++) {
-    const newCombos = [];
-    for (const combo of combos) {
-      for (const r of subSegments[i].readings) {
-        newCombos.push([...combo, r]);
-        if (newCombos.length > 20) break; // limit
-      }
-      if (newCombos.length > 20) break;
-    }
-    combos = newCombos;
-  }
-  return combos.map(c => c.join(''));
-}
-
-// Main function: Convert text to typing segments using kuromoji
-// Each segment = { display: original text, readings: [romaji options] }
-async function textToSegments(text) {
-  const tokenizer = await initKuromoji();
-  const tokens = tokenizer.tokenize(text);
-  const segments = [];
-
-  for (const token of tokens) {
-    const surface = token.surface_form;
-
-    // Newlines
-    if (surface === '\n' || surface === '\r\n') {
-      segments.push({ display: '\u21B5', readings: ['\n'] });
-      continue;
-    }
-
-    // Whitespace-only
-    if (/^\s+$/.test(surface)) {
-      for (const ch of surface) {
-        if (ch === '\n') {
-          segments.push({ display: '\u21B5', readings: ['\n'] });
-        } else {
-          segments.push({ display: ' ', readings: [' '] });
-        }
-      }
-      continue;
-    }
-
-    // ASCII passthrough (letter by letter)
-    if (/^[a-zA-Z0-9 !?.,;:'"`~@#$%^&*()\[\]{}<>\/|+=_\-]+$/.test(surface)) {
-      for (const ch of surface) {
-        segments.push({ display: ch, readings: [ch.toLowerCase()] });
-      }
-      continue;
-    }
-
-    // Japanese punctuation / symbols - map directly
-    if (/^[\u3000-\u3004\u3006-\u303F\uFF01-\uFF60]+$/.test(surface)) {
-      for (const ch of surface) {
-        if (ROMAJI_MAP[ch]) {
-          segments.push({ display: ch, readings: [ROMAJI_MAP[ch]] });
-        } else if (ROMAJI_MAP[kataToHira(ch)]) {
-          segments.push({ display: ch, readings: [ROMAJI_MAP[kataToHira(ch)]] });
-        } else {
-          segments.push({ display: ch, readings: [ch] });
-        }
-      }
-      continue;
-    }
-
-    // Get reading from kuromoji (katakana) -> hiragana
-    const reading = token.reading || token.pronunciation || '';
-    const hiraReading = kataToHira(reading);
-
-    // If kuromoji gave us a reading, use it for the whole word as one segment
-    if (hiraReading && hiraReading.length > 0 && /^[\u3040-\u309F\u30A0-\u30FF]+$/.test(reading)) {
-      const subSegs = hiraToSegments(hiraReading);
-      const combinedReadings = mergeReadings(subSegs);
-      segments.push({ display: surface, readings: combinedReadings });
-      continue;
-    }
-
-    // Fallback: if the surface itself is kana, process character by character
-    const surfaceHira = kataToHira(surface);
-    if (/^[\u3040-\u309F]+$/.test(surfaceHira)) {
-      const subSegs = hiraToSegments(surfaceHira);
-      const combinedReadings = mergeReadings(subSegs);
-      segments.push({ display: surface, readings: combinedReadings });
-      continue;
-    }
-
-    // Last resort: display as-is, character by character
-    for (const ch of surface) {
-      const chHira = kataToHira(ch);
-      if (ROMAJI_MAP[chHira]) {
-        segments.push({ display: ch, readings: [ROMAJI_MAP[chHira]] });
-      } else {
-        // Truly unknown char - skip it in typing (auto-advance)
-        segments.push({ display: ch, readings: [''] });
-      }
-    }
-  }
-
-  // Filter out empty-reading segments (they'd just confuse typing)
-  return segments.filter(s => s.readings.length > 0 && s.readings[0] !== '');
-}
-
-
-// ============================================================
-// Text Cleaning Engine
-// ============================================================
-
-// Common navigation / UI noise patterns to remove
 const NOISE_PATTERNS = [
-  // Nav items: short words separated by pipes, slashes, or just listed
   /^\s*(HOME|MENU|TOP|BACK|NEXT|PREV|INDEX|CONTACT|ABOUT|FAQ|SEARCH|LOGIN|LOGOUT|SIGN\s*(?:IN|UP|OUT)|REGISTER|CART|CLOSE|OPEN|SHARE|PRINT|DOWNLOAD|MORE|LESS|SHOW|HIDE|TOGGLE|EXPAND|COLLAPSE)\s*$/gim,
-  // Breadcrumbs: "HOME > Category > Subcategory" patterns
   /^\s*(?:HOME|TOP|トップ|ホーム)\s*[>›»→▶\|／/].*$/gm,
-  // Nav bars: lines that are mostly short items separated by delimiters
   /^\s*(?:[\w\u3000-\u9FFF]{1,8}\s*[|│｜/／>›»·・▸▶■□●○◆◇★☆]\s*){2,}[\w\u3000-\u9FFF]{1,8}\s*$/gm,
-  // Page numbers
   /^\s*(?:(?:p|P|ページ|page)?\.?\s*\d{1,5}\s*(?:\/\s*\d{1,5})?)\s*$/gm,
-  // Header/footer repeats: copyright, all rights reserved
   /^.*(?:©|Copyright|All\s*Rights\s*Reserved|無断転載禁止|無断複製|転載禁止).*$/gim,
-  // SNS share buttons text
   /^\s*(?:(?:Share|シェア|共有|Tweet|ツイート|いいね|Like|Follow|フォロー|Subscribe|RSS|LINE|Facebook|Twitter|Instagram|YouTube|TikTok)\s*[\s|/・]*){2,}.*$/gim,
-  // Cookie/privacy banners
   /^.*(?:Cookie|クッキー|プライバシー|Privacy\s*Policy).*(?:同意|承諾|Accept|OK|閉じる|Close).*$/gim,
-  // Ad labels
   /^\s*(?:広告|PR|AD|Sponsored|スポンサー|\[PR\]|【PR】|【広告】|ADVERTISEMENT)\s*$/gim,
-  // Empty brackets/parens alone
   /^\s*[\[\]()（）「」『』【】{}\<\>]+\s*$/gm,
-  // Arrows and decorative separators alone on a line
   /^\s*[=\-─━═▬◆◇■□●○★☆♦♠♣♥►▶◄◀▲▼△▽※†‡§¶→←↑↓↔⇒⇐⇑⇓]{3,}\s*$/gm,
-  // "Read more" / "続きを読む" type links
   /^\s*(?:続きを読む|もっと見る|Read\s*more|See\s*more|View\s*all|Show\s*more|詳しくはこちら|Click\s*here|こちら)\s*[→>›»]?\s*$/gim,
-  // Category/tag labels (isolated short items)
   /^\s*(?:カテゴリ[ー:]?|タグ[:]?|Category[:]?|Tags?[:]?)\s*$/gim,
-  // Dates alone (just a date, no content)
   /^\s*\d{4}[\/\-\.年]\d{1,2}[\/\-\.月]\d{1,2}日?\s*$/gm,
-  // URLs alone on a line
   /^\s*https?:\/\/[^\s]+\s*$/gm,
-  // Email addresses alone
   /^\s*[\w.+-]+@[\w-]+\.[\w.]+\s*$/gm,
 ];
 
-// Lines that look like navigation when they appear at the very start or end
 const EDGE_NOISE_PATTERNS = [
-  // Very short lines (< 5 chars) at edges that are likely nav
   /^.{1,4}$/,
-  // Lines that are ALL CAPS or all katakana (likely menu items)
   /^[A-Z\s]{2,30}$/,
   /^[\u30A0-\u30FF\s]{2,10}$/,
 ];
 
 function cleanText(raw) {
   let text = raw;
-
-  // Step 1: Basic normalization
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  // Normalize multiple spaces (but keep newlines)
   text = text.replace(/[^\S\n]+/g, ' ');
 
-  // Step 2: Apply noise pattern removal
   for (const pattern of NOISE_PATTERNS) {
     text = text.replace(pattern, '');
   }
 
-  // Step 3: Remove noise lines at the beginning and end
   let lines = text.split('\n');
-  
-  // Trim noise from start
+
   while (lines.length > 0) {
     const line = lines[0].trim();
     if (line === '') { lines.shift(); continue; }
     const isNoise = EDGE_NOISE_PATTERNS.some(p => p.test(line));
-    // Also check if it's a nav-like line: multiple short words with no sentence structure
     const isNavLike = line.length < 50 && !line.match(/[。、.!?！？]/) && (line.split(/[\s|/・│｜]/).filter(w => w.trim()).length >= 3);
-    if (isNoise || isNavLike) {
-      lines.shift();
-    } else {
-      break;
-    }
+    if (isNoise || isNavLike) { lines.shift(); } else { break; }
   }
 
-  // Trim noise from end
   while (lines.length > 0) {
     const line = lines[lines.length - 1].trim();
     if (line === '') { lines.pop(); continue; }
     const isNoise = EDGE_NOISE_PATTERNS.some(p => p.test(line));
     const isNavLike = line.length < 50 && !line.match(/[。、.!?！？]/) && (line.split(/[\s|/・│｜]/).filter(w => w.trim()).length >= 3);
-    if (isNoise || isNavLike) {
-      lines.pop();
-    } else {
-      break;
-    }
+    if (isNoise || isNavLike) { lines.pop(); } else { break; }
   }
 
-  // Step 4: Collapse excessive blank lines
   text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-
   return text;
 }
-
 
 // ============================================================
 // State Management
@@ -387,6 +80,7 @@ const state = {
   currentDoc: null,
   currentProgress: null,
   currentBookmarks: [],
+  // Typing state - segments come from the server (pre-analyzed)
   segments: [],
   segmentIndex: 0,
   charIndex: 0,
@@ -560,7 +254,6 @@ async function loadDocuments() {
 }
 
 function renderDashboard() {
-  // Check if we need to show preview
   if (state.view === 'dashboard' && state.previewContent) {
     return renderPreview();
   }
@@ -671,7 +364,7 @@ function bindDashboard() {
 }
 
 // ============================================================
-// File Parsing
+// File Parsing (client-side)
 // ============================================================
 async function handleFile(file) {
   const indicator = document.getElementById('parsing-indicator');
@@ -696,7 +389,6 @@ async function handleFile(file) {
     text = text.trim();
     if (!text) { alert('テキストを抽出できませんでした'); return; }
 
-    // Clean the text and show preview
     const cleaned = cleanText(text);
     const title = name.replace(/\.[^.]+$/, '');
     showPreview(title, cleaned, ext);
@@ -728,13 +420,13 @@ async function parseDocx(file) {
 }
 
 // ============================================================
-// Preview View (text cleaning confirmation)
+// Preview View
 // ============================================================
 function showPreview(title, content, sourceType) {
   state.previewTitle = title;
   state.previewContent = content;
   state.previewSourceType = sourceType;
-  render(); // re-renders dashboard which will show preview
+  render();
 }
 
 function renderPreview() {
@@ -775,7 +467,7 @@ function bindPreview() {
   const cancelBtn2 = document.getElementById('preview-cancel-btn');
   const saveBtn = document.getElementById('preview-save');
 
-  if (!cancelBtn) return; // not in preview mode
+  if (!cancelBtn) return;
 
   const doCancel = () => {
     state.previewTitle = '';
@@ -791,6 +483,11 @@ function bindPreview() {
     const title = document.getElementById('preview-title').value.trim() || '無題';
     const content = document.getElementById('preview-content').value.trim();
     if (!content) { alert('テキストが空です'); return; }
+
+    // Show loading state
+    saveBtn.disabled = true;
+    saveBtn.textContent = '解析中...';
+
     state.previewTitle = '';
     state.previewContent = '';
     await saveAndOpen(title, content, state.previewSourceType);
@@ -801,6 +498,7 @@ function bindPreview() {
 async function saveAndOpen(title, content, sourceType) {
   content = content.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 
+  // Send to server - server will analyze text with kuromoji and store segments
   const data = await api('/documents', {
     method: 'POST',
     body: JSON.stringify({ title, content, sourceType }),
@@ -818,25 +516,49 @@ async function saveAndOpen(title, content, sourceType) {
 // Open Document & Start Typing
 // ============================================================
 async function openDocument(docId) {
+  // Show loading
+  state.view = 'typing';
+  state.segments = [];
+  render();
+
+  const textEl = document.getElementById('text-display');
+  const romaEl = document.getElementById('romaji-display');
+  if (textEl) textEl.innerHTML = '<span class="text-ink-400">テキストを準備中...</span>';
+  if (romaEl) romaEl.innerHTML = '';
+
   const data = await api('/documents/' + docId);
-  if (data.error) { alert(data.error); return; }
+  if (data.error) { alert(data.error); state.view = 'dashboard'; render(); return; }
 
   state.currentDoc = data.document;
   state.currentProgress = data.progress;
   state.currentBookmarks = data.bookmarks || [];
 
-  // Show loading while kuromoji initializes
-  state.view = 'typing';
-  state.segments = [];
-  render();
-  const textEl = document.getElementById('text-display');
-  const romaEl = document.getElementById('romaji-display');
-  if (textEl) textEl.innerHTML = '<span class="text-ink-400">辞書を読み込み中...</span>';
-  if (romaEl) romaEl.innerHTML = '<span class="text-ink-300 text-sm">初回のみ数秒かかります</span>';
+  // Use pre-analyzed segments from server
+  if (data.segments && data.segments.length > 0) {
+    state.segments = data.segments;
+  } else {
+    // No segments yet - try re-analyzing
+    if (textEl) textEl.innerHTML = '<span class="text-ink-400">テキストを解析中...</span>';
+    const analyzeResult = await api('/documents/' + docId + '/analyze', { method: 'POST' });
+    if (analyzeResult.ok) {
+      // Refetch with segments
+      const refetch = await api('/documents/' + docId);
+      state.segments = refetch.segments || [];
+    }
+    if (!state.segments || state.segments.length === 0) {
+      alert('テキストの解析に失敗しました。しばらくしてから再度お試しください。');
+      state.view = 'dashboard';
+      await loadDocuments();
+      render();
+      return;
+    }
+  }
 
-  const content = data.document.content;
-  state.segments = await textToSegments(content);
   state.segmentIndex = data.progress?.current_position || 0;
+  // Make sure segmentIndex doesn't exceed segments length
+  if (state.segmentIndex >= state.segments.length) {
+    state.segmentIndex = 0;
+  }
   state.charIndex = 0;
   state.activeReading = null;
   state.missCount = data.progress?.miss_count || 0;
@@ -862,7 +584,7 @@ function renderTyping() {
   <div class="max-w-3xl mx-auto px-4 py-6 min-h-screen flex flex-col typing-active" id="typing-container">
     <header class="flex items-center justify-between mb-6 flex-shrink-0">
       <button id="back-btn" class="text-ink-400 hover:text-ink-700 text-sm transition">\u2190 戻る</button>
-      <h2 class="text-sm font-medium truncate max-w-[50%]">${escHtml(doc.title)}</h2>
+      <h2 class="text-sm font-medium truncate max-w-[50%]">${escHtml(doc?.title || '')}</h2>
       <button id="bookmark-btn" class="text-ink-400 hover:text-ink-700 text-sm transition" title="ブックマーク">\uD83D\uDD16</button>
     </header>
 
@@ -888,10 +610,11 @@ function renderTyping() {
   </div>`;
 }
 
-// Global reference to the keydown handler so we can remove it
 let _keydownHandler = null;
 
 function bindTyping() {
+  if (state.segments.length === 0) return;
+
   updateTypingDisplay();
 
   document.getElementById('back-btn').onclick = async () => {
@@ -917,7 +640,6 @@ function bindTyping() {
     alert('ブックマークしました');
   };
 
-  // Remove old handler if exists
   if (_keydownHandler) {
     document.removeEventListener('keydown', _keydownHandler);
   }
@@ -954,7 +676,6 @@ function handleKeyDown(e) {
   const seg = state.segments[state.segmentIndex];
   const typed = e.key === 'Enter' ? '\n' : e.key;
 
-  // If no active reading chosen yet, find which reading matches the first char
   if (state.activeReading === null) {
     state.charIndex = 0;
     const matching = seg.readings.filter(r => r[0] === typed);
@@ -985,7 +706,7 @@ function handleKeyDown(e) {
         advanceSegment();
       }
     } else {
-      // Check if switching to alternative reading is possible
+      // Check for alternative reading switch
       const typedSoFar = state.activeReading.substring(0, state.charIndex) + typed;
       const alt = seg.readings.find(r => r.startsWith(typedSoFar) && r !== state.activeReading);
       if (alt) {

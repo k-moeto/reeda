@@ -1,6 +1,16 @@
 module.exports = {
   apps: [
     {
+      name: 'analyzer',
+      script: 'analyzer-server.mjs',
+      env: {
+        NODE_ENV: 'development'
+      },
+      watch: false,
+      instances: 1,
+      exec_mode: 'fork'
+    },
+    {
       name: 'reeda',
       script: 'npx',
       args: 'wrangler pages dev dist --d1=reeda-production --local --ip 0.0.0.0 --port 3000',

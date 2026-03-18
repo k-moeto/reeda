@@ -3,8 +3,30 @@ import { generateId } from '../lib/crypto';
 import { authMiddleware } from '../lib/auth-middleware';
 import type { Env } from '../types';
 
+const ANALYZER_URL = 'http://127.0.0.1:3001/analyze';
+
 const documents = new Hono<Env>();
 documents.use('*', authMiddleware);
+
+// Analyze text via the morphological analysis micro-server
+async function analyzeText(text: string): Promise<any[]> {
+  try {
+    const res = await fetch(ANALYZER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      console.error('Analyzer error:', res.status, await res.text());
+      return [];
+    }
+    const data = await res.json() as { segments: any[] };
+    return data.segments || [];
+  } catch (err) {
+    console.error('Failed to reach analyzer server:', err);
+    return [];
+  }
+}
 
 // Create document
 documents.post('/', async (c) => {
@@ -22,9 +44,13 @@ documents.post('/', async (c) => {
   const id = generateId();
   const totalChars = content.length;
 
+  // Analyze text server-side using kuromoji micro-server
+  const segments = await analyzeText(content);
+  const segmentsJson = segments.length > 0 ? JSON.stringify(segments) : null;
+
   await c.env.DB.prepare(
-    'INSERT INTO documents (id, user_id, title, content, source_type, total_chars) VALUES (?, ?, ?, ?, ?, ?)'
-  ).bind(id, userId, title, content, sourceType || 'txt', totalChars).run();
+    'INSERT INTO documents (id, user_id, title, content, source_type, total_chars, segments) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).bind(id, userId, title, content, sourceType || 'txt', totalChars, segmentsJson).run();
 
   // Create initial progress record
   const progressId = generateId();
@@ -32,7 +58,7 @@ documents.post('/', async (c) => {
     'INSERT INTO reading_progress (id, document_id, user_id) VALUES (?, ?, ?)'
   ).bind(progressId, id, userId).run();
 
-  return c.json({ document: { id, title, sourceType, totalChars } }, 201);
+  return c.json({ document: { id, title, sourceType, totalChars, hasSegments: segments.length > 0 } }, 201);
 });
 
 // List documents
@@ -40,6 +66,7 @@ documents.get('/', async (c) => {
   const userId = c.get('userId');
   const results = await c.env.DB.prepare(`
     SELECT d.id, d.title, d.source_type, d.total_chars, d.created_at,
+           d.segments IS NOT NULL as has_segments,
            rp.current_position, rp.completed, rp.last_read_at,
            rp.correct_count, rp.miss_count, rp.reading_time_sec
     FROM documents d
@@ -51,7 +78,7 @@ documents.get('/', async (c) => {
   return c.json({ documents: results.results });
 });
 
-// Get single document with content
+// Get single document with content and segments
 documents.get('/:id', async (c) => {
   const userId = c.get('userId');
   const docId = c.req.param('id');
@@ -70,7 +97,45 @@ documents.get('/:id', async (c) => {
     'SELECT * FROM bookmarks WHERE document_id = ? AND user_id = ? ORDER BY position ASC'
   ).bind(docId, userId).all();
 
-  return c.json({ document: doc, progress, bookmarks: bookmarks.results });
+  // Parse segments from JSON if available
+  let segments = null;
+  if (doc.segments) {
+    try {
+      segments = JSON.parse(doc.segments as string);
+    } catch {
+      segments = null;
+    }
+  }
+
+  return c.json({ 
+    document: { ...doc, segments: undefined },
+    segments,
+    progress, 
+    bookmarks: bookmarks.results 
+  });
+});
+
+// Re-analyze a document (in case segments were not generated on creation)
+documents.post('/:id/analyze', async (c) => {
+  const userId = c.get('userId');
+  const docId = c.req.param('id');
+
+  const doc = await c.env.DB.prepare(
+    'SELECT id, content FROM documents WHERE id = ? AND user_id = ?'
+  ).bind(docId, userId).first();
+
+  if (!doc) return c.json({ error: 'ドキュメントが見つかりません' }, 404);
+
+  const segments = await analyzeText(doc.content as string);
+  if (segments.length === 0) {
+    return c.json({ error: '形態素解析に失敗しました。解析サーバーが起動しているか確認してください。' }, 500);
+  }
+
+  await c.env.DB.prepare(
+    'UPDATE documents SET segments = ?, updated_at = datetime(\'now\') WHERE id = ?'
+  ).bind(JSON.stringify(segments), docId).run();
+
+  return c.json({ ok: true, segmentCount: segments.length });
 });
 
 // Delete document
