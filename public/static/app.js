@@ -13,144 +13,354 @@ async function initPdfJs() {
 }
 
 // ============================================================
-// Text Cleaning Engine (client-side, applied before sending to server)
-// Removes metadata, headers, navigation, URLs, credits, and other
-// non-content text from articles, leaving only the main body.
+// Text Cleaning Engine v2 (client-side, applied before sending to server)
+//
+// Design philosophy:
+//   1. Remove PDF artifacts (repeated headers/footers, page numbers)
+//   2. Remove embedded link cards (URLs, article previews, Amazon cards)
+//   3. Remove author/date metadata lines
+//   4. Remove web UI chrome (nav, breadcrumbs, share buttons, ads)
+//   5. Strip characters that should not be typed (emoji, decorative quotes)
+//      but preserve their semantic meaning where possible
+//   6. Preserve ALL body text — paragraphs, headings, dialogue, quotes
+//   7. Work line-by-line for predictability; never eat body sentences
 // ============================================================
-const NOISE_PATTERNS = [
-  // UI / Navigation labels
-  /^\s*(HOME|MENU|TOP|BACK|NEXT|PREV|INDEX|CONTACT|ABOUT|FAQ|SEARCH|LOGIN|LOGOUT|SIGN\s*(?:IN|UP|OUT)|REGISTER|CART|CLOSE|OPEN|SHARE|PRINT|DOWNLOAD|MORE|LESS|SHOW|HIDE|TOGGLE|EXPAND|COLLAPSE)\s*$/gim,
-  // Breadcrumbs
-  /^\s*(?:HOME|TOP|トップ|ホーム)\s*[>›»→▶\|／/].*$/gm,
-  // Nav bars (short items separated by delimiters)
-  /^\s*(?:[\w\u3000-\u9FFF]{1,8}\s*[|│｜/／>›»·・▸▶■□●○◆◇★☆]\s*){2,}[\w\u3000-\u9FFF]{1,8}\s*$/gm,
-  // Page numbers
-  /^\s*(?:(?:p|P|ページ|page)?\.?\s*\d{1,5}\s*(?:\/\s*\d{1,5})?)\s*$/gm,
-  // Copyright / legal
-  /^.*(?:©|Copyright|All\s*Rights\s*Reserved|無断転載禁止|無断複製|転載禁止).*$/gim,
-  // Social share buttons
-  /^\s*(?:(?:Share|シェア|共有|Tweet|ツイート|いいね|Like|Follow|フォロー|Subscribe|RSS|LINE|Facebook|Twitter|Instagram|YouTube|TikTok)\s*[\s|/・]*){2,}.*$/gim,
-  // Cookie/privacy banners
-  /^.*(?:Cookie|クッキー|プライバシー|Privacy\s*Policy).*(?:同意|承諾|Accept|OK|閉じる|Close).*$/gim,
-  // Ad labels
-  /^\s*(?:広告|PR|AD|Sponsored|スポンサー|\[PR\]|【PR】|【広告】|ADVERTISEMENT)\s*$/gim,
-  // Lines that are only brackets/parens
-  /^\s*[\[\]()（）「」『』【】{}<>〈〉《》〔〕\u3014\u3015]+\s*$/gm,
-  // Decorative separator lines
-  /^\s*[=\-─━═▬◆◇■□●○★☆♦♠♣♥►▶◄◀▲▼△▽※†‡§¶→←↑↓↔⇒⇐⇑⇓…‥・]{3,}\s*$/gm,
-  // "Read more" links
-  /^\s*(?:続きを読む|もっと見る|もっと読む|Read\s*more|See\s*more|View\s*all|Show\s*more|詳しくはこちら|Click\s*here|こちら|詳細を見る|全文を読む)\s*[→>›»]?\s*$/gim,
-  // Category/tag labels alone
-  /^\s*(?:カテゴリ[ー:]?|タグ[:]?|Category[:]?|Tags?[:]?)\s*$/gim,
-  // Dates alone on a line
-  /^\s*\d{4}[\/\-\.年]\d{1,2}[\/\-\.月]\d{1,2}日?\s*$/gm,
-  // URLs anywhere (inline or standalone)
-  /https?:\/\/[^\s)\]>」』】]+/gm,
-  // Email addresses alone
-  /^\s*[\w.+-]+@[\w-]+\.[\w.]+\s*$/gm,
-  // Subscription / newsletter prompts
-  /^\s*(?:メールマガジン|ニュースレター|Newsletter|メルマガ|購読|配信登録|登録はこちら).*$/gim,
-  // Comment section headers
-  /^\s*(?:コメント|Comments?|コメントを(?:書く|残す|投稿)|Leave\s*a?\s*(?:comment|reply)|返信).*$/gim,
-  // Related articles headers
-  /^\s*(?:関連(?:記事|ニュース|リンク)|おすすめ記事|人気記事|新着記事|Related\s*(?:Articles?|Posts?|Links?)|Recommended|Popular|Recent).*$/gim,
-  // Author/publish metadata lines (short, with labels)
-  /^\s*(?:著者|執筆者|ライター|Author|Writer|By)\s*[:：]\s*.{0,30}\s*$/gim,
-  /^\s*(?:公開日|更新日|投稿日|掲載日|Published|Updated|Posted)\s*[:：]?\s*\d{4}.*$/gim,
-  // "Back to top" / pagination
-  /^\s*(?:ページの先頭へ|トップに戻る|Back\s*to\s*top|前へ|次へ|前のページ|次のページ)\s*$/gim,
-  // Pure number sequences (like page counts)
-  /^\s*\d+\s*$/gm,
-  // Photo credits / caption metadata
-  /^\s*(?:聞き手|写真|撮影|取材|構成|イラスト|編集|文|TEXT|PHOTO|Photo|Text)\s*[:：].*$/gim,
-  // Lines combining multiple credit roles (e.g. "聞き手・文: X 写真: Y")
-  /^\s*(?:(?:聞き手|写真|撮影|取材|構成|イラスト|編集|文|TEXT|PHOTO)\s*[:：・]?\s*[^\n]{0,30}\s*){2,}$/gim,
-  // ※ annotations
-  /^\s*※.{0,120}$/gm,
-  // Title-like lines with separator: "text | site" or "text - label"
-  /^\s*.{1,60}\s*[|｜\-–—]\s*.{1,30}\s*$/gm,
-  // Staff/role labels alone
-  /^\s*(?:[A-Za-z]+\s+Staff|Staff|STAFF|スタッフ|編集部|ライター|記者|EDITOR|Editor)\s*$/gim,
-  // Person with title/affiliation in parentheses: "名前 (肩書)"
-  /^\s*.{1,20}\s*[\(（].{1,30}[\)）]\s*$/gm,
-  // Bullet-point list items (short)
-  /^\s*[・\-\*]\s*.{1,50}\s*$/gm,
-  // "Previous / Next" article navigation
-  /^\s*(?:前の記事|次の記事|前の(?:ページ|投稿)|次の(?:ページ|投稿)|Previous|Next)\s*.{0,30}\s*$/gim,
-];
 
-const EDGE_NOISE_PATTERNS = [
-  /^.{1,4}$/,
-  /^[A-Z\s]{2,30}$/,
-  /^[\u30A0-\u30FF\s]{2,10}$/,
-];
+// --- Phase 1: Line-level removal patterns ---
+// Each pattern removes an ENTIRE line if it matches.
+// Applied to individual lines (no /m flag needed).
 
-// Detect if a line is actual body content (readable text)
-function _isBodyLine(line) {
-  if (!line || line.trim() === '') return false;
+function _isNoiseLine(line) {
   const t = line.trim();
-  // Dialogue: "名前: セリフ"
-  if (/^.{1,10}[:：]\s*.{5,}/.test(t)) return true;
-  // Sentence with ending punctuation and contains Japanese
-  if (/[。！？!?」』\)）]\s*$/.test(t) && /[\u3040-\u9FFF]/.test(t)) return true;
-  // Long paragraph with Japanese
-  if (t.length >= 40 && /[\u3040-\u9FFF]/.test(t)) return true;
+  if (t === '') return false; // blank lines handled separately
+
+  // --- PDF header/footer patterns ---
+  // Repeated page header: "2025/11/12 10:34 記事タイトル｜著者名"
+  if (/^\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}\s+/.test(t)) return true;
+  // Page footer: URL + page number like "https://... 1/4" or just "1/4", "2/4"
+  if (/^\d{1,4}\s*\/\s*\d{1,4}\s*$/.test(t)) return true;
+  if (/^https?:\/\/\S+\s+\d{1,4}\s*\/\s*\d{1,4}\s*$/.test(t)) return true;
+  // Standalone URL line
+  if (/^\s*https?:\/\/\S+\s*$/.test(t)) return true;
+  // Bare domain line: "www.nikkei.com", "amzn.asia"
+  if (/^\s*(?:www\.|amzn\.)\S+\s*$/i.test(t)) return true;
+  // Domain-only line (xxx.com, xxx.co.jp, etc.)
+  if (/^\s*[a-zA-Z0-9.-]+\.\s*(?:com|co\.jp|net|org|io|asia|jp)\s*$/i.test(t)) return true;
+  // URL + page number within text: "https://... 1/4"
+  if (/https?:\/\/\S+\s+\d{1,4}\s*\/\s*\d{1,4}/.test(t)) return true;
+
+  // --- Author / date metadata ---
+  // "著者名｜肩書き" pattern (short, with ｜ separator)
+  if (/^.{1,20}[|｜].{1,30}$/.test(t) && t.length < 50) return true;
+  // Standalone date: "2025年10月31日 22:28" (handles both standard and CJK compat chars)
+  if (/^\d{4}[年\u2F49]\d{1,2}[月⽉]\d{1,2}[日⽇]/.test(t) && t.length < 40) return true;
+  // "YYYY/MM/DD" or "YYYY-MM-DD" alone
+  if (/^\s*\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\s*$/.test(t)) return true;
+
+  // --- Embedded link card / article preview ---
+  // Amazon product card lines
+  if (/(?:amzn\.asia|amazon\.co\.jp|Amazon\.co\.jpで購入)/i.test(t)) return true;
+  // Price lines: "1,980円 (2025年..." or "¥1,980"
+  if (/^\s*[¥￥]?\s*[\d,]+\s*円/.test(t)) return true;
+  // "詳しくはこちら" standalone
+  if (/^\s*(?:詳しくはこちら|詳細はこちら|こちらから|購入する)\s*$/i.test(t)) return true;
+  // Lines that are just a newspaper/site name: "- 日本経済新聞"
+  if (/^\s*[-–—]\s*.{1,20}(?:新聞|ニュース|News)\s*$/i.test(t)) return true;
+  // Lines ending with " - 日本経済新聞" (card title with attribution)
+  if (/[-–—]\s*.{1,20}(?:新聞|ニュース|News)\s*$/i.test(t) && t.length < 100) return true;
+
+  // --- Inline URL removal (strip URL from within a line) ---
+  // (handled in Phase 2 inline cleaning, not here)
+
+  // --- Web UI chrome ---
+  // Navigation labels
+  if (/^\s*(HOME|MENU|TOP|BACK|NEXT|PREV|INDEX|CONTACT|ABOUT|FAQ|SEARCH|LOGIN|LOGOUT|SIGN\s*(?:IN|UP|OUT)|REGISTER|CART|CLOSE|OPEN|SHARE|PRINT|DOWNLOAD)\s*$/i.test(t)) return true;
+  // Breadcrumbs
+  if (/^\s*(?:HOME|TOP|トップ|ホーム)\s*[>›»→▶|／\/]/.test(t)) return true;
+  // Copyright / legal
+  if (/(?:©|Copyright|All\s*Rights\s*Reserved|無断転載禁止|無断複製|転載禁止)/i.test(t)) return true;
+  // Social share clusters
+  if (/^\s*(?:(?:Share|シェア|共有|Tweet|ツイート|いいね|Like|Follow|フォロー|Subscribe|RSS)\s*[|/・\s]*){2,}/i.test(t)) return true;
+  // Cookie/privacy banners
+  if (/(?:Cookie|クッキー).*(?:同意|承諾|Accept|OK)/i.test(t)) return true;
+  // Ad labels
+  if (/^\s*(?:広告|PR|AD|Sponsored|スポンサー|\[PR\]|【PR】|【広告】|ADVERTISEMENT)\s*$/i.test(t)) return true;
+  // "Read more" / "続きを読む" standalone
+  if (/^\s*(?:続きを読む|もっと見る|もっと読む|Read\s*more|See\s*more|View\s*all|Show\s*more|詳細を見る|全文を読む)\s*[→>›»]?\s*$/i.test(t)) return true;
+  // Back to top / pagination
+  if (/^\s*(?:ページの先頭へ|トップに戻る|Back\s*to\s*top|前へ|次へ|前のページ|次のページ)\s*$/i.test(t)) return true;
+  // Comment section
+  if (/^\s*(?:コメント|Comments?|コメントを(?:書く|残す|投稿)|Leave\s*a?\s*(?:comment|reply))\s*$/i.test(t)) return true;
+  // Related articles
+  if (/^\s*(?:関連(?:記事|ニュース|リンク)|おすすめ記事|人気記事|新着記事|Related\s*(?:Articles?|Posts?)|Recommended)\s*$/i.test(t)) return true;
+  // Photo credits / byline metadata
+  if (/^\s*(?:聞き手|写真|撮影|取材|構成|イラスト|編集|文|TEXT|PHOTO)\s*[:：]/.test(t) && t.length < 80) return true;
+  // Email addresses alone
+  if (/^\s*[\w.+-]+@[\w-]+\.[\w.]+\s*$/.test(t)) return true;
+  // Decorative separator lines (===, ---, ━━━, etc.)
+  if (/^\s*[=\-─━═▬◆◇■□●○★☆♦♠♣♥►▶◄◀▲▼△▽※†‡§¶→←↑↓↔⇒⇐⇑⇓…‥・]{3,}\s*$/.test(t)) return true;
+  // Lines that are only brackets/quotes
+  if (/^\s*[\[\]()（）「」『』【】{}<>〈〉《》〔〕""''\u3014\u3015]+\s*$/.test(t)) return true;
+  // Pure number on a line
+  if (/^\s*\d+\s*$/.test(t)) return true;
+  // ※ annotation lines
+  if (/^\s*※/.test(t) && t.length < 120) return true;
+
   return false;
 }
 
-// Find the index where body content starts, skipping header metadata
-function _findBodyStart(lines) {
-  // If the first non-empty line is already body, return it immediately
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (t === '') continue;
-    if (_isBodyLine(t)) return i;
-    break; // first non-empty line is not body; continue scanning
-  }
-  // Scan forward for the first body line
-  for (let i = 0; i < lines.length; i++) {
-    if (_isBodyLine(lines[i])) return i;
-  }
-  return 0;
+// Check if a line is a genuine body sentence
+function _isBodySentence(line) {
+  const t = line.trim();
+  if (t.length < 8) return false;
+  // Contains Japanese kana/kanji and has sentence-like ending
+  if (/[\u3040-\u9FFF\u{20000}-\u{2A6DF}]/u.test(t) && /[。！？!?」』）\)、]$/.test(t)) return true;
+  // Long line with Japanese characters (paragraph continuation)
+  // In PDFs, lines are often wrapped at ~40 chars, so 20 is a safe threshold
+  if (t.length >= 20 && /[\u3040-\u9FFF\u{20000}-\u{2A6DF}]/u.test(t)) return true;
+  // Medium line that starts like a continuation (hiragana particle start)
+  if (t.length >= 10 && /^[のでをにはがもとへやりるれろめねけせてえ]/.test(t)) return true;
+  return false;
 }
 
+// --- Phase 2: Inline cleaning ---
+// Remove parts within a line (URLs, markdown artifacts, etc.)
+function _cleanLineInline(line) {
+  let t = line;
+  // Remove inline URLs
+  t = t.replace(/https?:\/\/[^\s)\]>」』】]+/g, '');
+  // Remove markdown heading markers
+  t = t.replace(/^#{1,6}\s+/gm, '');
+  // Remove bare domains that appear inline
+  t = t.replace(/\b(?:www\.)\S+/gi, '');
+  // Collapse multiple spaces
+  t = t.replace(/\s{2,}/g, ' ');
+  return t.trim();
+}
+
+// --- Phase 3: Character-level cleaning ---
+// Replace characters the user shouldn't have to type, while preserving
+// the readable content. These are applied AFTER line-level cleaning.
+function _cleanCharacters(text) {
+  let t = text;
+
+  // Replace decorative/curly quotes with standard ASCII quotes
+  // \u201C \u201D (curly double quotes) → remove entirely (visual-only in Japanese articles)
+  // \u2018 \u2019 (curly single quotes) → remove entirely
+  t = t.replace(/[\u201C\u201D]/g, '');
+  t = t.replace(/[\u2018\u2019]/g, '');
+
+  // NOTE: Emojis are NOT removed here. They are kept in the text and the
+  // analyzer will create "skip" segments for them (display but no typing).
+
+  // Remove special dashes that are just visual (keep ── as paragraph separator if needed)
+  // ──── (long rule) → remove if 3+ consecutive
+  t = t.replace(/[─━]{3,}/g, '');
+
+  // Collapse spaces left behind
+  t = t.replace(/[ \t]{2,}/g, ' ');
+
+  // Remove empty quote pairs left behind after content removal
+  // 「 」 → remove, 『 』 → remove, " " → remove, ( ) → remove
+  t = t.replace(/「\s*」/g, '');
+  t = t.replace(/『\s*』/g, '');
+  t = t.replace(/"\s*"/g, '');
+  t = t.replace(/\(\s*\)/g, '');
+
+  return t;
+}
+
+// --- Phase 4: Detect & remove PDF repeated headers/footers ---
+// PDFs often repeat the exact same header line on every page.
+// We detect lines that appear 3+ times in the document (exact match).
+function _findRepeatedLines(lines, minCount = 2) {
+  const counts = {};
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.length < 5 || t.length > 200) continue; // only mid-length lines
+    counts[t] = (counts[t] || 0) + 1;
+  }
+  const repeated = new Set();
+  for (const [text, count] of Object.entries(counts)) {
+    if (count >= minCount) repeated.add(text);
+  }
+  return repeated;
+}
+
+// --- Phase 5: Detect & remove embedded link cards (multi-line blocks) ---
+// Strategy: classify lines, find anchor clusters, remove card blocks conservatively.
+function _removeEmbeddedCards(lines) {
+  const removeSet = new Set();
+
+  // Classify each line
+  const lineType = lines.map(l => {
+    const t = l.trim();
+    if (t === '') return 'blank';
+    // Page footer URLs (URL followed by page number like "1/4") → treat as noise, NOT card anchor
+    if (/^\s*https?:\/\/\S+\s+\d{1,4}\s*\/\s*\d{1,4}\s*$/.test(t)) return 'text';
+    // Standalone URLs → only anchor if they look like article card URLs (short, no page number)
+    if (/^\s*https?:\/\/\S+\s*$/.test(t)) return 'url';
+    if (/^\s*(?:www\.|amzn\.)\S+$/i.test(t)) return 'domain';
+    if (/^\s*[a-zA-Z0-9.-]+\.\s*(?:com|co\.jp|net|org|io|asia|jp)\s*$/i.test(t)) return 'domain';
+    if (/(?:Amazon\.co\.jp|で購入する)/i.test(t)) return 'purchase';
+    if (/^\s*[¥￥]?\s*[\d,]+\s*円/.test(t)) return 'price';
+    if (/[-–—]\s*.{1,20}(?:新聞|ニュース|News)\s*$/i.test(t) && t.length < 100) return 'attribution';
+    if (/(?:詳しくはこちら|詳細はこちら|こちらから|購入する)\s*$/i.test(t) && t.length < 40) return 'cta';
+    return 'text';
+  });
+
+  const isAnchor = i => lineType[i] !== 'text' && lineType[i] !== 'blank';
+
+  // Remove all non-text lines
+  for (let i = 0; i < lines.length; i++) {
+    if (isAnchor(i)) removeSet.add(i);
+  }
+
+  // For each anchor, remove only DIRECTLY adjacent short non-body lines
+  for (let i = 0; i < lines.length; i++) {
+    if (!isAnchor(i)) continue;
+
+    // Backward: remove up to 2 short adjacent lines
+    for (let b = i - 1; b >= Math.max(0, i - 2); b--) {
+      const t = lines[b].trim();
+      if (t === '' || removeSet.has(b)) break;
+      // Stop if line is long enough to be body text (even without punctuation)
+      if (t.length >= 35) break;
+      // Stop if line has sentence-ending punctuation
+      if (/[。！？!?」』）、]$/.test(t)) break;
+      removeSet.add(b);
+    }
+
+    // Forward: remove up to 2 short adjacent lines
+    for (let f = i + 1; f < Math.min(lines.length, i + 3); f++) {
+      const t = lines[f].trim();
+      if (t === '' || removeSet.has(f)) break;
+      if (t.length >= 35) break;
+      if (/[。！？!?」』）、]$/.test(t)) break;
+      if (isAnchor(f)) continue;
+      removeSet.add(f);
+    }
+  }
+
+  return lines.filter((_, i) => !removeSet.has(i));
+}
+
+// --- Main cleanText function ---
 function cleanText(raw) {
   let text = raw;
+
+  // Normalize line endings and whitespace
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   text = text.replace(/[^\S\n]+/g, ' ');
 
-  // Apply noise patterns
-  for (const pattern of NOISE_PATTERNS) {
-    text = text.replace(pattern, '');
-  }
-
   let lines = text.split('\n');
 
-  // Trim leading noise
-  while (lines.length > 0) {
-    const line = lines[0].trim();
-    if (line === '') { lines.shift(); continue; }
-    const isNoise = EDGE_NOISE_PATTERNS.some(p => p.test(line));
-    const isNavLike = line.length < 50 && !line.match(/[。、.!?！？]/) && (line.split(/[\s|/・│｜]/).filter(w => w.trim()).length >= 3);
-    if (isNoise || isNavLike) { lines.shift(); } else { break; }
+  // Phase 4: Remove repeated header/footer lines (PDF artifacts)
+  const repeated = _findRepeatedLines(lines);
+  if (repeated.size > 0) {
+    lines = lines.filter(l => !repeated.has(l.trim()));
   }
 
-  // Skip header/metadata: find where body content actually starts
-  const bodyIdx = _findBodyStart(lines);
-  if (bodyIdx > 0) {
-    lines = lines.slice(bodyIdx);
+  // Phase 5: Remove embedded link cards (BEFORE Phase 1, because Phase 1
+  // would remove the URL/domain anchor lines that Phase 5 relies on)
+  lines = _removeEmbeddedCards(lines);
+
+  // Phase 1: Remove noise lines (but preserve numbers that precede counter words)
+  {
+    const filtered = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (_isNoiseLine(lines[i])) {
+        const t = lines[i].trim();
+        // Before removing a pure number, check if adjacent line starts with a counter/suffix
+        if (/^\s*\d+\s*$/.test(t)) {
+          // Check next line
+          if (i + 1 < lines.length && /^[分個本冊枚回目番号件秒]/.test(lines[i + 1].trim())) {
+            lines[i + 1] = t + lines[i + 1].trim();
+            continue;
+          }
+          // Check previous line (PDF may split "分でできる\n5" reversed)
+          if (filtered.length > 0 && /^[分個本冊枚回目番号件秒]/.test(filtered[filtered.length - 1].trim())) {
+            filtered[filtered.length - 1] = t + filtered[filtered.length - 1].trim();
+            continue;
+          }
+        }
+        continue; // skip noise line
+      }
+      filtered.push(lines[i]);
+    }
+    lines = filtered;
+  }
+
+  // Phase 1b: (split heading rejoining now handled above in Phase 1)
+
+
+  // Phase 2: Inline cleaning on remaining lines
+  lines = lines.map(l => _cleanLineInline(l));
+
+  // Remove lines that became empty after inline cleaning
+  // (but preserve intentional blank lines between paragraphs)
+  let cleaned = [];
+  for (const line of lines) {
+    if (line.trim() === '' && cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === '') {
+      continue; // collapse multiple blanks
+    }
+    cleaned.push(line);
+  }
+  lines = cleaned;
+
+  // Find where body content starts (skip remaining header noise)
+  // A "body sentence" at the top should be the actual first paragraph,
+  // not a title fragment. We look for the first line that:
+  //   - Starts with a Japanese quote mark (「『), OR
+  //   - Ends with sentence punctuation (。！？), OR
+  //   - Is followed by another long line (paragraph continuation)
+  let bodyStart = 0;
+  for (let i = 0; i < Math.min(lines.length, 20); i++) {
+    const t = lines[i].trim();
+    if (t === '') continue;
+    // Strong signal: starts with opening quote or is a clear paragraph start
+    if (/^[「『（]/.test(t) && t.length >= 15) { bodyStart = i; break; }
+    // Long line ending with sentence punctuation
+    if (t.length >= 30 && /[。！？!?」』）]$/.test(t)) { bodyStart = i; break; }
+    // Medium line that's followed by another medium-to-long line (paragraph)
+    if (t.length >= 30 && i + 1 < lines.length) {
+      const next = lines[i + 1].trim();
+      if (next.length >= 20 && /[\u3040-\u9FFF]/.test(next)) { bodyStart = i; break; }
+    }
+  }
+  // Only trim if there are clearly non-body lines at the top
+  if (bodyStart > 0) {
+    // Check that what we're trimming is short header/title content, not actual body
+    const trimCandidates = lines.slice(0, bodyStart);
+    const allTrimSafe = trimCandidates.every(l => {
+      const t = l.trim();
+      if (t === '') return true;
+      // Short lines without sentence ending → safe to trim
+      if (t.length < 80 && !/[。！？!?」』）]$/.test(t)) return true;
+      return false;
+    });
+    if (allTrimSafe) {
+      lines = lines.slice(bodyStart);
+    }
   }
 
   // Trim trailing noise
   while (lines.length > 0) {
-    const line = lines[lines.length - 1].trim();
-    if (line === '') { lines.pop(); continue; }
-    const isNoise = EDGE_NOISE_PATTERNS.some(p => p.test(line));
-    const isNavLike = line.length < 50 && !line.match(/[。、.!?！？]/) && (line.split(/[\s|/・│｜]/).filter(w => w.trim()).length >= 3);
-    if (isNoise || isNavLike) { lines.pop(); } else { break; }
+    const t = lines[lines.length - 1].trim();
+    if (t === '') { lines.pop(); continue; }
+    if (_isNoiseLine(lines[lines.length - 1])) { lines.pop(); continue; }
+    if (t.length < 10 && !_isBodySentence(t)) { lines.pop(); continue; }
+    break;
   }
 
-  text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  text = lines.join('\n');
+
+  // Phase 3: Character-level cleaning
+  text = _cleanCharacters(text);
+
+  // Final cleanup
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+
   return text;
 }
 
@@ -655,10 +865,10 @@ async function openDocument(docId) {
   if (state.segmentIndex >= state.segments.length) {
     state.segmentIndex = 0;
   }
-  // Skip any leading newline segments at current position
+  // Skip any leading newline/skip segments at current position
   while (state.segmentIndex < state.segments.length) {
     const seg = state.segments[state.segmentIndex];
-    if (seg.readings.length === 1 && seg.readings[0] === '\n') {
+    if (seg.skip || (seg.readings.length === 1 && seg.readings[0] === '\n')) {
       state.segmentIndex++;
     } else {
       break;
@@ -840,10 +1050,10 @@ function advanceSegment() {
   state.charIndex = 0;
   state.activeReading = null;
 
-  // Auto-skip newline segments (no need to press Enter)
+  // Auto-skip newline segments and emoji/skip segments (no need to press Enter or type emoji)
   while (state.segmentIndex < state.segments.length) {
     const next = state.segments[state.segmentIndex];
-    if (next.readings.length === 1 && next.readings[0] === '\n') {
+    if (next.skip || (next.readings.length === 1 && next.readings[0] === '\n')) {
       state.segmentIndex++;
     } else {
       break;

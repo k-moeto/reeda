@@ -197,6 +197,10 @@ function mergeReadings(parts) {
   return combos.map(c => c.join(''));
 }
 
+// --- Emoji detection ---
+// Matches most emoji: emoticons, symbols, flags, etc.
+const EMOJI_RE = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}\u{1F1E0}-\u{1F1FF}]/u;
+
 // --- Main analysis function ---
 function analyzeText(text) {
   const tokens = tokenizer.tokenize(text);
@@ -216,6 +220,21 @@ function analyzeText(text) {
       for (const ch of surface) {
         if (ch === '\n') segments.push({ display: '\u21B5', readings: ['\n'] });
         else segments.push({ display: ' ', readings: [' '] });
+      }
+      continue;
+    }
+
+    // Emoji: display but skip during typing (empty readings array → auto-skip)
+    if (EMOJI_RE.test(surface)) {
+      // Process each character - emoji chars become skip segments
+      for (const ch of [...surface]) {
+        if (EMOJI_RE.test(ch)) {
+          segments.push({ display: ch, readings: [], skip: true });
+        } else if (ch === ' ') {
+          segments.push({ display: ' ', readings: [' '] });
+        } else if (ROMAJI_MAP[ch]) {
+          segments.push({ display: ch, readings: [ROMAJI_MAP[ch]] });
+        }
       }
       continue;
     }
@@ -275,7 +294,7 @@ function analyzeText(text) {
     }
   }
 
-  return segments.filter(s => s.readings.length > 0 && s.readings[0] !== '');
+  return segments.filter(s => s.skip || (s.readings.length > 0 && s.readings[0] !== ''));
 }
 
 // --- HTTP Server ---
