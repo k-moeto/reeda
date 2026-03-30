@@ -61,6 +61,102 @@ documents.post('/', async (c) => {
   return c.json({ document: { id, title, sourceType, totalChars, hasSegments: segments.length > 0 } }, 201);
 });
 
+// Import from URL
+documents.post('/import-url', async (c) => {
+  const userId = c.get('userId');
+  const { url } = await c.req.json<{ url: string }>();
+
+  if (!url || !/^https?:\/\/.+/.test(url)) {
+    return c.json({ error: '有効なURLを入力してください' }, 400);
+  }
+
+  try {
+    // Fetch the page
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Reeda/1.0)',
+        'Accept': 'text/html,application/xhtml+xml',
+      },
+    });
+
+    if (!res.ok) {
+      return c.json({ error: `ページの取得に失敗しました (${res.status})` }, 400);
+    }
+
+    const html = await res.text();
+
+    // Extract title from <title> tag
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    let title = titleMatch ? titleMatch[1].trim() : new URL(url).hostname;
+    // Clean up common title patterns like "Title | SiteName"
+    title = title.replace(/\s*[|\-–—]\s*[^|\-–—]+$/, '').trim() || title;
+
+    // Extract text content from HTML
+    const content = extractTextFromHtml(html);
+
+    if (!content || content.length < 10) {
+      return c.json({ error: 'テキストを抽出できませんでした' }, 400);
+    }
+
+    return c.json({ title, content, sourceType: 'url' });
+  } catch (err: any) {
+    console.error('URL import error:', err);
+    return c.json({ error: 'URLの取得に失敗しました: ' + (err.message || '不明なエラー') }, 500);
+  }
+});
+
+function extractTextFromHtml(html: string): string {
+  // Remove script, style, nav, header, footer, aside, form tags and their content
+  let cleaned = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<nav[\s\S]*?<\/nav>/gi, '')
+    .replace(/<header[\s\S]*?<\/header>/gi, '')
+    .replace(/<footer[\s\S]*?<\/footer>/gi, '')
+    .replace(/<aside[\s\S]*?<\/aside>/gi, '')
+    .replace(/<form[\s\S]*?<\/form>/gi, '')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+
+  // Try to find <article> or <main> content first
+  let articleMatch = cleaned.match(/<article[\s\S]*?>([\s\S]*?)<\/article>/i);
+  if (!articleMatch) {
+    articleMatch = cleaned.match(/<main[\s\S]*?>([\s\S]*?)<\/main>/i);
+  }
+  
+  const source = articleMatch ? articleMatch[1] : cleaned;
+
+  // Replace block-level tags with newlines
+  let text = source
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/h[1-6]>/gi, '\n\n')
+    .replace(/<\/blockquote>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<[^>]+>/g, '') // Remove all remaining tags
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&[a-zA-Z]+;/gi, '')
+    .replace(/&#\d+;/gi, '');
+
+  // Normalize whitespace
+  text = text
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .join('\n');
+
+  return text.trim();
+}
+
 // List documents
 documents.get('/', async (c) => {
   const userId = c.get('userId');
@@ -163,12 +259,39 @@ documents.put('/:id/progress', async (c) => {
     completed: boolean;
   }>();
 
+  // Get previous progress to calculate delta
+  const prev = await c.env.DB.prepare(
+    'SELECT correct_count, miss_count, reading_time_sec, total_typed FROM reading_progress WHERE document_id = ? AND user_id = ?'
+  ).bind(docId, userId).first<{correct_count: number; miss_count: number; reading_time_sec: number; total_typed: number}>();
+
   await c.env.DB.prepare(`
     UPDATE reading_progress
     SET current_position = ?, total_typed = ?, correct_count = ?, miss_count = ?,
         reading_time_sec = ?, completed = ?, last_read_at = datetime('now'), updated_at = datetime('now')
     WHERE document_id = ? AND user_id = ?
   `).bind(currentPosition, totalTyped, correctCount, missCount, readingTimeSec, completed ? 1 : 0, docId, userId).run();
+
+  // Update daily reading session stats (delta-based)
+  const deltaCorrect = Math.max(0, correctCount - (prev?.correct_count || 0));
+  const deltaMiss = Math.max(0, missCount - (prev?.miss_count || 0));
+  const deltaTime = Math.max(0, readingTimeSec - (prev?.reading_time_sec || 0));
+  const deltaTyped = Math.max(0, totalTyped - (prev?.total_typed || 0));
+
+  if (deltaTyped > 0 || deltaTime > 0) {
+    const today = new Date().toISOString().split('T')[0];
+    const sessionId = generateId();
+    await c.env.DB.prepare(`
+      INSERT INTO reading_sessions (id, user_id, date, chars_typed, correct_count, miss_count, reading_time_sec, sessions_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      ON CONFLICT(user_id, date) DO UPDATE SET
+        chars_typed = chars_typed + excluded.chars_typed,
+        correct_count = correct_count + excluded.correct_count,
+        miss_count = miss_count + excluded.miss_count,
+        reading_time_sec = reading_time_sec + excluded.reading_time_sec,
+        sessions_count = sessions_count + 1,
+        updated_at = datetime('now')
+    `).bind(sessionId, userId, today, deltaTyped, deltaCorrect, deltaMiss, deltaTime).run();
+  }
 
   return c.json({ ok: true });
 });
